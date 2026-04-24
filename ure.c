@@ -1432,13 +1432,17 @@ static void
 ure_ifmedia_init(ure_softc_t *sc)
 {
 	/* Set MAC address */
-	ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
-	    URE_CRWECR_CONFIG);
-	ure_write_mem(sc, URE_PLA_IDR,
-	    URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
-	    sc->ure_dev_addr, 8);
-	ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
-	    URE_CRWECR_NORAML);
+	{
+		uint8_t addr[8] = {0};
+		bcopy(sc->ure_dev_addr, addr, ETHERADDRL);
+		ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
+		    URE_CRWECR_CONFIG);
+		ure_write_mem(sc, URE_PLA_IDR,
+		    URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
+		    addr, sizeof (addr));
+		ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
+		    URE_CRWECR_NORAML);
+	}
 
 	if (!(sc->ure_flags & URE_FLAG_8152)) {
 		uint32_t reg;
@@ -2154,11 +2158,13 @@ ure_m_unicst(void *arg, const uint8_t *macaddr)
 	mutex_enter(&sc->ure_lock);
 	bcopy(macaddr, sc->ure_dev_addr, ETHERADDRL);
 	if (sc->ure_running) {
+		uint8_t addr[8] = {0};
+		bcopy(sc->ure_dev_addr, addr, ETHERADDRL);
 		ure_write_1(sc, URE_PLA_CRWECR,
 		    URE_MCU_TYPE_PLA, URE_CRWECR_CONFIG);
 		ure_write_mem(sc, URE_PLA_IDR,
 		    URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
-		    sc->ure_dev_addr, 8);
+		    addr, sizeof (addr));
 		ure_write_1(sc, URE_PLA_CRWECR,
 		    URE_MCU_TYPE_PLA, URE_CRWECR_NORAML);
 	}
