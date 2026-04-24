@@ -1511,6 +1511,12 @@ ure_ifmedia_init(ure_softc_t *sc)
 
 	if (!(sc->ure_flags & URE_FLAG_8152)) {
 		uint32_t reg;
+
+		if (sc->ure_flags & (URE_FLAG_8156B | URE_FLAG_8157))
+			URE_CLRBIT_2(sc, URE_USB_RX_AGGR_NUM,
+			    URE_MCU_TYPE_USB,
+			    URE_RX_AGGR_NUM_MASK);
+
 		reg = sc->ure_rxbufsz - (ETHERMAX + VLAN_TAGSZ);
 		if (sc->ure_flags & URE_FLAG_8157)
 			reg -= sizeof (ure_rxpkt_v2_t) +
