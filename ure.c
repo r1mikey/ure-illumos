@@ -1384,6 +1384,40 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 
 	if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B |
 	    URE_FLAG_8157)) {
+		uint16_t reg;
+
+		ure_write_2(sc, URE_PLA_RX_FIFO_FULL,
+		    URE_MCU_TYPE_PLA,
+		    (sc->ure_flags & URE_FLAG_8156) ? 1024 : 512);
+		ure_write_2(sc, URE_PLA_RX_FIFO_EMPTY,
+		    URE_MCU_TYPE_PLA,
+		    (sc->ure_flags & URE_FLAG_8156) ? 2048 : 1024);
+
+		/* TX share FIFO free credit full threshold */
+		ure_write_2(sc, URE_PLA_TXFIFO_CTRL,
+		    URE_MCU_TYPE_PLA, 8);
+		ure_write_2(sc, URE_PLA_TXFIFO_FULL,
+		    URE_MCU_TYPE_PLA, 128);
+
+		if (sc->ure_flags & URE_FLAG_8156)
+			URE_SETBIT_2(sc, URE_USB_BMU_CONFIG,
+			    URE_MCU_TYPE_USB, URE_ACT_ODMA);
+
+		/* FIFO settings */
+		reg = ure_read_2(sc, URE_PLA_RXFIFO_FULL,
+		    URE_MCU_TYPE_PLA);
+		reg &= ~URE_RXFIFO_FULL_MASK;
+		ure_write_2(sc, URE_PLA_RXFIFO_FULL,
+		    URE_MCU_TYPE_PLA, reg | 0x0008);
+
+		URE_CLRBIT_2(sc, URE_PLA_MAC_PWR_CTRL3,
+		    URE_MCU_TYPE_PLA, URE_PLA_MCU_SPDWN_EN);
+
+		if (!(sc->ure_flags & URE_FLAG_8157))
+			URE_CLRBIT_2(sc, URE_USB_SPEED_OPTION,
+			    URE_MCU_TYPE_USB,
+			    URE_RG_PWRDN_EN | URE_ALL_SPEED_OFF);
+
 		ure_write_4(sc, URE_USB_RX_BUF_TH,
 		    URE_MCU_TYPE_USB, 0x00600400);
 	} else {
