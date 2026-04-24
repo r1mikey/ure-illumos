@@ -1539,6 +1539,18 @@ ure_ifmedia_init(ure_softc_t *sc)
 			    158 : 80);
 			ure_write_2(sc, URE_USB_PM_CTRL_STATUS,
 			    URE_MCU_TYPE_USB, 1875);
+
+			if (ure_dev_speed(sc) ==
+			    USBA_HIGH_SPEED_DEV) {
+				uint16_t l1reg;
+				l1reg = ure_read_2(sc,
+				    URE_USB_L1_CTRL,
+				    URE_MCU_TYPE_USB);
+				l1reg &= ~0x0f;
+				ure_write_2(sc, URE_USB_L1_CTRL,
+				    URE_MCU_TYPE_USB,
+				    l1reg | 0x01);
+			}
 		} else {
 			ure_write_2(sc, URE_USB_RX_EARLY_SIZE,
 			    URE_MCU_TYPE_USB, reg / 4);
