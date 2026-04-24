@@ -936,9 +936,15 @@ ure_rtl8153_init(ure_softc_t *sc)
 	URE_CLRBIT_2(sc, URE_USB_MISC_0, URE_MCU_TYPE_USB,
 	    URE_PCUT_STATUS);
 
-	(void) memset(u1u2, 0xff, sizeof (u1u2));
-	ure_write_mem(sc, URE_USB_TOLERANCE,
-	    URE_BYTE_EN_SIX_BYTES, u1u2, sizeof (u1u2));
+	/*
+	 * Do not re-enable U1/U2 device-side link power management.
+	 * The RTL8153 family is known to initiate U1/U2 transitions
+	 * that cause link instability and spontaneous disconnects.
+	 * Linux carries USB_QUIRK_NO_LPM for 0bda:8153 to prevent
+	 * host-side U1/U2 negotiation; since illumos USBA has no
+	 * device quirk mechanism, we suppress it here at the device
+	 * register level instead.
+	 */
 
 	ure_write_2(sc, URE_PLA_MAC_PWR_CTRL,
 	    URE_MCU_TYPE_PLA, 0);
@@ -1051,9 +1057,15 @@ ure_rtl8153b_init(ure_softc_t *sc)
 		    reg | URE_POLL_LINK_CHG);
 	}
 
-	if (ure_dev_speed(sc) == USBA_SUPER_SPEED_DEV)
-		URE_SETBIT_2(sc, URE_USB_LPM_CONFIG,
-		    URE_MCU_TYPE_USB, URE_LPM_U1U2_EN);
+	/*
+	 * Do not re-enable U1/U2 device-side link power management.
+	 * These Realtek chips are known to initiate U1/U2 transitions
+	 * that cause link instability and spontaneous disconnects;
+	 * Linux carries USB_QUIRK_NO_LPM for 0bda:8153 to suppress
+	 * host-side U1/U2 negotiation.  Since illumos USBA has no
+	 * device quirk mechanism, we keep U1/U2 disabled at the
+	 * device register level instead.
+	 */
 
 	if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B)) {
 		URE_CLRBIT_2(sc, URE_PLA_MAC_PWR_CTRL3,
@@ -1471,19 +1483,15 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		URE_SETBIT_2(sc, URE_USB_U2P3_CTRL,
 		    URE_MCU_TYPE_USB, URE_U2P3_ENABLE);
 
-	if (sc->ure_flags & (URE_FLAG_8153B | URE_FLAG_8156 |
-	    URE_FLAG_8156B)) {
-		if (ure_dev_speed(sc) ==
-		    USBA_SUPER_SPEED_DEV)
-			URE_SETBIT_2(sc, URE_USB_LPM_CONFIG,
-			    URE_MCU_TYPE_USB,
-			    URE_LPM_U1U2_EN);
-	} else if (!(sc->ure_flags & URE_FLAG_8157)) {
-		(void) memset(u1u2, 0xff, sizeof (u1u2));
-		ure_write_mem(sc, URE_USB_TOLERANCE,
-		    URE_BYTE_EN_SIX_BYTES,
-		    u1u2, sizeof (u1u2));
-	}
+	/*
+	 * Do not re-enable U1/U2 device-side link power management.
+	 * These Realtek chips are known to initiate U1/U2 transitions
+	 * that cause link instability and spontaneous disconnects;
+	 * Linux carries USB_QUIRK_NO_LPM for 0bda:8153 to suppress
+	 * host-side U1/U2 negotiation.  Since illumos USBA has no
+	 * device quirk mechanism, we keep U1/U2 disabled at the
+	 * device register level instead.
+	 */
 
 	return (0);
 }
