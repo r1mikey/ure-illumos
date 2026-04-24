@@ -1,4 +1,3 @@
-/*      $OpenBSD: if_ure.c,v 1.37 2025/06/04 00:06:17 jsg Exp $ */
 /*-
  * Copyright (c) 2015, 2016, 2019 Kevin Lo <kevlo@openbsd.org>
  * Copyright (c) 2020 Jonathon Fletcher <jonathon.fletcher@gmail.com>
@@ -370,9 +369,9 @@ _info(struct modinfo *modinfop)
 	return (mod_info(&ure_modlinkage, modinfop));
 }
 
-/* ================================================================ */
-/* Register access primitives                                       */
-/* ================================================================ */
+/*
+ * Register access primitives
+ */
 
 /*
  * Low-level USB vendor control transfer.
@@ -541,9 +540,9 @@ ure_write_4(ure_softc_t *sc, uint16_t reg, uint16_t index,
 	    index | URE_BYTE_EN_DWORD, temp, 4));
 }
 
-/* ================================================================ */
-/* PHY access via OCP (On-Chip Protocol)                            */
-/* ================================================================ */
+/*
+ * PHY access via OCP (On-Chip Protocol)
+ */
 
 static uint16_t
 ure_ocp_reg_read(ure_softc_t *sc, uint16_t addr)
@@ -650,9 +649,9 @@ ure_phy_write(ure_softc_t *sc, uint16_t addr, uint16_t data)
 }
 
 
-/* ================================================================ */
-/* Chip helper functions                                            */
-/* ================================================================ */
+/*
+ * Chip helper functions
+ */
 
 static void
 ure_disable_teredo(ure_softc_t *sc)
@@ -799,9 +798,9 @@ ure_rxvlan(ure_softc_t *sc)
 	}
 }
 
-/* ================================================================ */
-/* Chip init sequences                                              */
-/* ================================================================ */
+/*
+ * Chip init sequences
+ */
 
 static void
 ure_rtl8152_init(ure_softc_t *sc)
@@ -1216,9 +1215,9 @@ ure_rtl8157_init(ure_softc_t *sc)
 	return (0);
 }
 
-/* ================================================================ */
-/* NIC reset (called per interface-up)                              */
-/* ================================================================ */
+/*
+ * NIC reset (called per interface-up)
+ */
 
 static int
 ure_rtl8152_nic_reset(ure_softc_t *sc)
@@ -1497,9 +1496,9 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 }
 
 
-/* ================================================================ */
-/* Media / link state                                               */
-/* ================================================================ */
+/*
+ * Media / link state
+ */
 
 static void
 ure_ifmedia_init(ure_softc_t *sc)
@@ -1716,9 +1715,9 @@ ure_link_check(void *arg)
 	}
 }
 
-/* ================================================================ */
-/* RX filter (multicast hash, promisc)                              */
-/* ================================================================ */
+/*
+ * RX filter (multicast hash, promisc)
+ */
 
 static void
 ure_set_rx_filter(ure_softc_t *sc)
@@ -1756,9 +1755,9 @@ ure_set_rx_filter(ure_softc_t *sc)
 	ure_write_4(sc, URE_PLA_RCR, URE_MCU_TYPE_PLA, rxmode);
 }
 
-/* ================================================================ */
-/* RX path                                                          */
-/* ================================================================ */
+/*
+ * RX path
+ */
 
 static void
 ure_rx_start(ure_softc_t *sc)
@@ -1926,9 +1925,9 @@ restart:
 	mutex_exit(&sc->ure_lock);
 }
 
-/* ================================================================ */
-/* TX path                                                          */
-/* ================================================================ */
+/*
+ * TX path
+ */
 
 static void
 ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
@@ -2096,9 +2095,9 @@ ure_m_tx(void *arg, mblk_t *mp)
 	return (mp);
 }
 
-/* ================================================================ */
-/* MAC callbacks                                                    */
-/* ================================================================ */
+/*
+ * MAC callbacks
+ */
 
 static int
 ure_m_stat(void *arg, uint_t stat, uint64_t *val)
@@ -2365,9 +2364,9 @@ ure_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 	}
 }
 
-/* ================================================================ */
-/* USB pipe management                                              */
-/* ================================================================ */
+/*
+ * USB pipe management
+ */
 
 static int
 ure_open_pipes(ure_softc_t *sc)
@@ -2420,9 +2419,9 @@ ure_close_pipes(ure_softc_t *sc)
 	}
 }
 
-/* ================================================================ */
-/* USB event callbacks                                              */
-/* ================================================================ */
+/*
+ * USB event callbacks
+ */
 
 static int
 ure_disconnect_cb(dev_info_t *dip)
@@ -2497,9 +2496,9 @@ ure_reconnect_cb(dev_info_t *dip)
 	return (DDI_SUCCESS);
 }
 
-/* ================================================================ */
-/* Chip identification                                              */
-/* ================================================================ */
+/*
+ * Chip identification
+ */
 
 static void
 ure_chip_init(ure_softc_t *sc)
@@ -2645,9 +2644,9 @@ ure_chip_init(ure_softc_t *sc)
 	}
 }
 
-/* ================================================================ */
-/* Attach / Detach                                                  */
-/* ================================================================ */
+/*
+ * Attach / Detach
+ */
 
 static void
 ure_cleanup(ure_softc_t *sc)
