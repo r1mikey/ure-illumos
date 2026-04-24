@@ -115,6 +115,7 @@
 #include <sys/crc32.h>
 #include <sys/vlan.h>
 #include <sys/strsubr.h>
+#include <sys/atomic.h>
 #include <inet/ip.h>
 
 #include "urereg.h"
@@ -1711,7 +1712,7 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 
 	if (req->bulk_completion_reason != USB_CR_OK) {
 		if (req->bulk_completion_reason != USB_CR_STOPPED_POLLING)
-			sc->ure_stat_ierrors++;
+			atomic_add_64(&sc->ure_stat_ierrors, 1);
 		goto restart;
 	}
 
@@ -1747,20 +1748,20 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 		total_len -= hdrsize;
 
 		if (pktlen > (int)total_len || pktlen < ETHERMIN) {
-			sc->ure_stat_ierrors++;
+			atomic_add_64(&sc->ure_stat_ierrors, 1);
 			break;
 		}
 
 		/* Strip CRC */
 		int actual = pktlen - ETHERFCSL;
 		if (actual <= 0) {
-			sc->ure_stat_ierrors++;
+			atomic_add_64(&sc->ure_stat_ierrors, 1);
 			break;
 		}
 
 		mp = allocb(actual + VLAN_TAGSZ, BPRI_MED);
 		if (mp == NULL) {
-			sc->ure_stat_norcvbuf++;
+			atomic_add_64(&sc->ure_stat_norcvbuf, 1);
 			break;
 		}
 
@@ -1777,8 +1778,8 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 			tail = mp;
 		}
 
-		sc->ure_stat_ipackets++;
-		sc->ure_stat_rbytes += actual;
+		atomic_add_64(&sc->ure_stat_ipackets, 1);
+		atomic_add_64(&sc->ure_stat_rbytes, actual);
 
 		uint32_t consumed = P2ROUNDUP(pktlen, align);
 		if (consumed > total_len)
@@ -1816,7 +1817,7 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	ure_softc_t *sc = (ure_softc_t *)req->bulk_client_private;
 
 	if (req->bulk_completion_reason != USB_CR_OK)
-		sc->ure_stat_oerrors++;
+		atomic_add_64(&sc->ure_stat_oerrors, 1);
 
 	usb_free_bulk_req(req);
 
@@ -1866,7 +1867,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 
 	txdata = allocb(txbufsz, BPRI_MED);
 	if (txdata == NULL) {
-		sc->ure_stat_oerrors++;
+		atomic_add_64(&sc->ure_stat_oerrors, 1);
 		mutex_enter(&sc->ure_tx_lock);
 		sc->ure_tx_busy = B_FALSE;
 		mutex_exit(&sc->ure_tx_lock);
@@ -1918,8 +1919,8 @@ ure_m_tx(void *arg, mblk_t *mp)
 			}
 		}
 
-		sc->ure_stat_opackets++;
-		sc->ure_stat_obytes += mlen;
+		atomic_add_64(&sc->ure_stat_opackets, 1);
+		atomic_add_64(&sc->ure_stat_obytes, mlen);
 
 		freemsg(mp);
 		mp = next;
@@ -1940,7 +1941,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 	req = usb_alloc_bulk_req(sc->ure_dip, 0,
 	    USB_FLAGS_NOSLEEP);
 	if (req == NULL) {
-		sc->ure_stat_oerrors++;
+		atomic_add_64(&sc->ure_stat_oerrors, 1);
 		freemsg(txdata);
 		mutex_enter(&sc->ure_tx_lock);
 		sc->ure_tx_busy = B_FALSE;
@@ -1958,7 +1959,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 
 	if (usb_pipe_bulk_xfer(sc->ure_bulkout_pipe, req, 0) !=
 	    USB_SUCCESS) {
-		sc->ure_stat_oerrors++;
+		atomic_add_64(&sc->ure_stat_oerrors, 1);
 		usb_free_bulk_req(req);
 		mutex_enter(&sc->ure_tx_lock);
 		sc->ure_tx_busy = B_FALSE;
