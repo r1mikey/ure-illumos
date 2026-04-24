@@ -156,8 +156,8 @@ typedef struct ure_softc {
 	usb_pipe_handle_t	ure_def_pipe;
 	usb_pipe_handle_t	ure_bulkin_pipe;
 	usb_pipe_handle_t	ure_bulkout_pipe;
-	usb_ep_descr_t		ure_bulkin_ep;
-	usb_ep_descr_t		ure_bulkout_ep;
+	usb_ep_xdescr_t		ure_bulkin_xdesc;
+	usb_ep_xdescr_t		ure_bulkout_xdesc;
 
 	/* MAC framework */
 	mac_handle_t		ure_mh;

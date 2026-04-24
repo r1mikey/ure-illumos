@@ -2377,8 +2377,8 @@ ure_open_pipes(ure_softc_t *sc)
 	bzero(&policy, sizeof (policy));
 	policy.pp_max_async_reqs = 2;
 
-	ret = usb_pipe_open(sc->ure_dip,
-	    &sc->ure_bulkin_ep, &policy,
+	ret = usb_pipe_xopen(sc->ure_dip,
+	    &sc->ure_bulkin_xdesc, &policy,
 	    USB_FLAGS_SLEEP, &sc->ure_bulkin_pipe);
 	if (ret != USB_SUCCESS) {
 		dev_err(sc->ure_dip, CE_WARN,
@@ -2386,8 +2386,8 @@ ure_open_pipes(ure_softc_t *sc)
 		return (DDI_FAILURE);
 	}
 
-	ret = usb_pipe_open(sc->ure_dip,
-	    &sc->ure_bulkout_ep, &policy,
+	ret = usb_pipe_xopen(sc->ure_dip,
+	    &sc->ure_bulkout_xdesc, &policy,
 	    USB_FLAGS_SLEEP, &sc->ure_bulkout_pipe);
 	if (ret != USB_SUCCESS) {
 		dev_err(sc->ure_dip, CE_WARN,
@@ -2762,7 +2762,13 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		    "no bulk IN endpoint found");
 		goto fail;
 	}
-	sc->ure_bulkin_ep = ep_data->ep_descr;
+	ret = usb_ep_xdescr_fill(USB_EP_XDESCR_CURRENT_VERSION,
+	    dip, ep_data, &sc->ure_bulkin_xdesc);
+	if (ret != USB_SUCCESS) {
+		dev_err(dip, CE_WARN,
+		    "failed to fill bulk IN xdescr: %d", ret);
+		goto fail;
+	}
 
 	ep_data = usb_lookup_ep_data(dip, sc->ure_dev_data,
 	    0, 0, 0, USB_EP_ATTR_BULK, USB_EP_DIR_OUT);
@@ -2771,7 +2777,13 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		    "no bulk OUT endpoint found");
 		goto fail;
 	}
-	sc->ure_bulkout_ep = ep_data->ep_descr;
+	ret = usb_ep_xdescr_fill(USB_EP_XDESCR_CURRENT_VERSION,
+	    dip, ep_data, &sc->ure_bulkout_xdesc);
+	if (ret != USB_SUCCESS) {
+		dev_err(dip, CE_WARN,
+		    "failed to fill bulk OUT xdescr: %d", ret);
+		goto fail;
+	}
 
 	/* Step 4: Initialise mutexes */
 	mutex_init(&sc->ure_lock, NULL, MUTEX_DRIVER,
