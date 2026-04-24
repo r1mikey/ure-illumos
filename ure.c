@@ -1848,6 +1848,11 @@ ure_m_tx(void *arg, mblk_t *mp)
 
 	if (sc->ure_gone || !sc->ure_running ||
 	    !(sc->ure_flags & URE_FLAG_LINK)) {
+		int ndrop = 0;
+		mblk_t *m;
+		for (m = mp; m != NULL; m = m->b_next)
+			ndrop++;
+		atomic_add_64(&sc->ure_stat_oerrors, ndrop);
 		freemsgchain(mp);
 		return (NULL);
 	}
