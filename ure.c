@@ -2470,6 +2470,11 @@ ure_chip_init(ure_softc_t *sc)
 		    "?RTL8153D (0x%04x)\n", ver);
 		break;
 	default:
+		/*
+		 * Unknown chip version — fall through to RTL8153 init.
+		 * No ure_flags chip bit is set, so the init-variant
+		 * switch below will take the default (RTL8153) path.
+		 */
 		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
 		sc->ure_txbufsz = URE_TX_BUFSZ;
 		dev_err(sc->ure_dip, CE_WARN,
