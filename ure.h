@@ -75,6 +75,7 @@
 
 #include <sys/types.h>
 #include <sys/ethernet.h>
+#include <sys/list.h>
 #include <sys/mac_provider.h>
 #include <sys/usb/usba.h>
 
@@ -125,6 +126,14 @@ extern "C" {
 #define	URE_ENDPT_RX		0
 #define	URE_ENDPT_TX		1
 #define	URE_ENDPT_MAX		2
+
+/*
+ * Multicast address tracking entry.
+ */
+typedef struct ure_mcast_entry {
+	list_node_t		node;
+	uint8_t			addr[ETHERADDRL];
+} ure_mcast_entry_t;
 
 /*
  * Per-instance softstate.
@@ -204,6 +213,7 @@ typedef struct ure_softc {
 	/* Multicast hash (64-bit, CRC32-BE >> 26) */
 	boolean_t		ure_promisc;
 	uint32_t		ure_mcast_hash[2];
+	list_t			ure_mcast_list;
 
 } ure_softc_t;
 

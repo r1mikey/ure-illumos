@@ -2128,20 +2128,19 @@ ure_m_promisc(void *arg, boolean_t on)
 	return (0);
 }
 
-static int
-ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
+/*
+ * Compute CRC32-BE hash for a multicast address and return the
+ * 6-bit hash table index.
+ */
+static uint32_t
+ure_mcast_hash_bit(const uint8_t *addr)
 {
-	ure_softc_t *sc = (ure_softc_t *)arg;
-	uint32_t crc, bit;
+	uint32_t crc = 0xffffffff;
+	int i, j;
 
-	/*
-	 * Compute CRC32-BE hash, use top 6 bits to index
-	 * the 64-bit multicast hash table.
-	 */
-	crc = 0xffffffff;
-	for (int i = 0; i < ETHERADDRL; i++) {
-		uint8_t c = mca[i];
-		for (int j = 0; j < 8; j++) {
+	for (i = 0; i < ETHERADDRL; i++) {
+		uint8_t c = addr[i];
+		for (j = 0; j < 8; j++) {
 			if ((crc ^ c) & 1)
 				crc = (crc >> 1) ^ 0xedb88320;
 			else
@@ -2149,24 +2148,61 @@ ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 			c >>= 1;
 		}
 	}
-	/* Use top 6 bits = bit index into 64-bit hash */
-	bit = (crc >> 26) & 0x3f;
+	return ((crc >> 26) & 0x3f);
+}
 
-	mutex_enter(&sc->ure_lock);
-	if (add) {
+/*
+ * Rebuild the 64-bit multicast hash from the tracked address list.
+ * Caller must hold ure_lock.
+ */
+static void
+ure_mcast_hash_rebuild(ure_softc_t *sc)
+{
+	ure_mcast_entry_t *me;
+	uint32_t bit;
+
+	ASSERT(MUTEX_HELD(&sc->ure_lock));
+
+	sc->ure_mcast_hash[0] = 0;
+	sc->ure_mcast_hash[1] = 0;
+
+	for (me = list_head(&sc->ure_mcast_list); me != NULL;
+	    me = list_next(&sc->ure_mcast_list, me)) {
+		bit = ure_mcast_hash_bit(me->addr);
 		if (bit < 32)
 			sc->ure_mcast_hash[0] |= (1U << bit);
 		else
-			sc->ure_mcast_hash[1] |=
-			    (1U << (bit - 32));
-	} else {
-		/*
-		 * We can't precisely remove a single address
-		 * from the hash.  Rebuild would require tracking
-		 * the full multicast list.  For now, leave the
-		 * bit set — over-matching is harmless.
-		 */
+			sc->ure_mcast_hash[1] |= (1U << (bit - 32));
 	}
+}
+
+static int
+ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
+{
+	ure_softc_t *sc = (ure_softc_t *)arg;
+
+	mutex_enter(&sc->ure_lock);
+	if (add) {
+		ure_mcast_entry_t *me;
+		me = kmem_zalloc(sizeof (*me), KM_NOSLEEP);
+		if (me == NULL) {
+			mutex_exit(&sc->ure_lock);
+			return (ENOMEM);
+		}
+		bcopy(mca, me->addr, ETHERADDRL);
+		list_insert_tail(&sc->ure_mcast_list, me);
+	} else {
+		ure_mcast_entry_t *me;
+		for (me = list_head(&sc->ure_mcast_list); me != NULL;
+		    me = list_next(&sc->ure_mcast_list, me)) {
+			if (bcmp(me->addr, mca, ETHERADDRL) == 0) {
+				list_remove(&sc->ure_mcast_list, me);
+				kmem_free(me, sizeof (*me));
+				break;
+			}
+		}
+	}
+	ure_mcast_hash_rebuild(sc);
 	if (sc->ure_running)
 		ure_set_rx_filter(sc);
 	mutex_exit(&sc->ure_lock);
@@ -2545,6 +2581,14 @@ ure_cleanup(ure_softc_t *sc)
 
 	ure_close_pipes(sc);
 
+	/* Free multicast address list */
+	{
+		ure_mcast_entry_t *me;
+		while ((me = list_remove_head(&sc->ure_mcast_list)) != NULL)
+			kmem_free(me, sizeof (*me));
+		list_destroy(&sc->ure_mcast_list);
+	}
+
 	if (sc->ure_attach_seq & URE_ATTACH_MUTEX) {
 		mutex_destroy(&sc->ure_tx_lock);
 		mutex_destroy(&sc->ure_lock);
@@ -2600,6 +2644,8 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	sc->ure_gone = B_FALSE;
 	sc->ure_running = B_FALSE;
 	sc->ure_link_state = LINK_STATE_UNKNOWN;
+	list_create(&sc->ure_mcast_list, sizeof (ure_mcast_entry_t),
+	    offsetof(ure_mcast_entry_t, node));
 
 	/* Step 1: USB client attach */
 	ret = usb_client_attach(dip, USBDRV_VERSION, 0);
