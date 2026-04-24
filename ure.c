@@ -317,7 +317,7 @@ DDI_DEFINE_STREAM_OPS(
 
 static struct modldrv ure_modldrv = {
 	&mod_driverops,
-	"Realtek RTL815[2367] USB Ethernet",
+	"RTL815[2367] USB Ethernet",
 	&ure_dev_ops,
 };
 
