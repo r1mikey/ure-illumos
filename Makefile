@@ -64,7 +64,6 @@ OBJS		= $(SRCS:.c=.o)
 MODFILE		= $(MODULE)
 
 DESTDIR		= /kernel/drv/$(KARCH)
-CONFDIR		= /kernel/drv
 
 .KEEP_STATE:
 
@@ -79,19 +78,16 @@ $(MODFILE): $(OBJS)
 clean:
 	rm -f $(OBJS) $(MODFILE)
 
-install: $(MODFILE) $(MODULE).conf
+install: $(MODFILE)
 	@echo "Installing $(MODULE) driver..."
 	cp $(MODFILE) $(DESTDIR)/$(MODULE)
 	chmod 755 $(DESTDIR)/$(MODULE)
-	cp $(MODULE).conf $(CONFDIR)/$(MODULE).conf
-	chmod 644 $(CONFDIR)/$(MODULE).conf
 	@echo "Done. Run 'add_drv ure' or 'update_drv ure' to register."
 
 uninstall:
 	@echo "Removing $(MODULE) driver..."
 	-rem_drv $(MODULE) 2>/dev/null
 	rm -f $(DESTDIR)/$(MODULE)
-	rm -f $(CONFDIR)/$(MODULE).conf
 	@echo "Done."
 
 .PHONY: all clean install uninstall
