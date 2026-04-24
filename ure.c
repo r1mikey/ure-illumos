@@ -1568,6 +1568,22 @@ ure_ifmedia_init(ure_softc_t *sc)
 			ure_write_2(sc, URE_USB_RX_EARLY_AGG,
 			    URE_MCU_TYPE_USB, reg);
 		}
+
+		if (sc->ure_chip & URE_CHIP_VER_7420)
+			URE_SETBIT_2(sc, URE_PLA_MAC_PWR_CTRL4,
+			    URE_MCU_TYPE_PLA,
+			    URE_IDLE_SPDWN_EN);
+
+		if ((sc->ure_chip & URE_CHIP_VER_6010) ||
+		    (sc->ure_flags & URE_FLAG_8156B)) {
+			URE_CLRBIT_2(sc, URE_USB_FW_TASK,
+			    URE_MCU_TYPE_USB,
+			    URE_FC_PATCH_TASK);
+			delay(drv_usectohz(1000));
+			URE_SETBIT_2(sc, URE_USB_FW_TASK,
+			    URE_MCU_TYPE_USB,
+			    URE_FC_PATCH_TASK);
+		}
 	}
 
 	/* Reset the packet filter */
