@@ -1751,6 +1751,11 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 		off += hdrsize;
 		total_len -= hdrsize;
 
+		if (pktlen > ETHERMAX + VLAN_TAGSZ + ETHERFCSL) {
+			atomic_add_64(&sc->ure_stat_ierrors, 1);
+			break;
+		}
+
 		if (pktlen > (int)total_len || pktlen < ETHERMIN) {
 			atomic_add_64(&sc->ure_stat_ierrors, 1);
 			break;
