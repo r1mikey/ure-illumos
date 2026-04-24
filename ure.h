@@ -230,27 +230,6 @@ typedef struct ure_softc {
 	ure_write_4((sc), (reg), (idx), \
 	    ure_read_4((sc), (reg), (idx)) & ~(x))
 
-/*
- * Internal function prototypes (for use within ure.c).
- */
-static int	ure_ctl(ure_softc_t *, uint8_t, uint16_t, uint16_t,
-		    void *, int);
-static int	ure_read_mem(ure_softc_t *, uint16_t, uint16_t,
-		    void *, int);
-static int	ure_write_mem(ure_softc_t *, uint16_t, uint16_t,
-		    void *, int);
-static uint8_t	ure_read_1(ure_softc_t *, uint16_t, uint16_t);
-static uint16_t	ure_read_2(ure_softc_t *, uint16_t, uint16_t);
-static uint32_t	ure_read_4(ure_softc_t *, uint16_t, uint16_t);
-static int	ure_write_1(ure_softc_t *, uint16_t, uint16_t, uint32_t);
-static int	ure_write_2(ure_softc_t *, uint16_t, uint16_t, uint32_t);
-static int	ure_write_4(ure_softc_t *, uint16_t, uint16_t, uint32_t);
-
-static uint16_t	ure_ocp_reg_read(ure_softc_t *, uint16_t);
-static void	ure_ocp_reg_write(ure_softc_t *, uint16_t, uint16_t);
-static uint16_t	ure_rtl8157_ocp_reg_read(ure_softc_t *, uint16_t);
-static void	ure_rtl8157_ocp_reg_write(ure_softc_t *, uint16_t,
-		    uint16_t);
 
 #ifdef __cplusplus
 }
