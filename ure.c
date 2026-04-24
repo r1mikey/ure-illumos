@@ -1536,6 +1536,11 @@ ure_link_check(void *arg)
 
 	mutex_enter(&sc->ure_lock);
 
+	if (!sc->ure_running) {
+		mutex_exit(&sc->ure_lock);
+		return;
+	}
+
 	if (ure_get_link_status(sc)) {
 		new_link = LINK_STATE_UP;
 		status = ure_read_2(sc, URE_PLA_PHYSTATUS,
