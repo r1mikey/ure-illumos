@@ -1379,6 +1379,17 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		if (sc->ure_flags & URE_FLAG_8153B) {
 			ure_write_4(sc, URE_USB_RX_BUF_TH,
 			    URE_MCU_TYPE_USB, URE_RX_THR_B);
+
+			URE_CLRBIT_2(sc, URE_PLA_MAC_PWR_CTRL3,
+			    URE_MCU_TYPE_PLA, URE_PLA_MCU_SPDWN_EN);
+		} else {
+			URE_SETBIT_1(sc, URE_PLA_CONFIG6,
+			    URE_MCU_TYPE_PLA, URE_LANWAKE_CLR_EN);
+			URE_CLRBIT_1(sc, URE_PLA_LWAKE_CTRL_REG,
+			    URE_MCU_TYPE_PLA, URE_LANWAKE_PIN);
+			URE_CLRBIT_2(sc, URE_USB_SSPHYLINK1,
+			    URE_MCU_TYPE_USB,
+			    URE_DELAY_PHY_PWR_CHG);
 		}
 	}
 
