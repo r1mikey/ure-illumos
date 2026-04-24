@@ -1844,6 +1844,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 	uint32_t hdrsize, pkt_align;
 	unsigned char *buf;
 	uint32_t pos = 0;
+	int npkts = 0;
 
 	if (sc->ure_gone || !sc->ure_running ||
 	    !(sc->ure_flags & URE_FLAG_LINK)) {
@@ -1921,6 +1922,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 
 		atomic_add_64(&sc->ure_stat_opackets, 1);
 		atomic_add_64(&sc->ure_stat_obytes, mlen);
+		npkts++;
 
 		freemsg(mp);
 		mp = next;
@@ -1941,7 +1943,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 	req = usb_alloc_bulk_req(sc->ure_dip, 0,
 	    USB_FLAGS_NOSLEEP);
 	if (req == NULL) {
-		atomic_add_64(&sc->ure_stat_oerrors, 1);
+		atomic_add_64(&sc->ure_stat_oerrors, npkts);
 		freemsg(txdata);
 		mutex_enter(&sc->ure_tx_lock);
 		sc->ure_tx_busy = B_FALSE;
@@ -1959,7 +1961,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 
 	if (usb_pipe_bulk_xfer(sc->ure_bulkout_pipe, req, 0) !=
 	    USB_SUCCESS) {
-		atomic_add_64(&sc->ure_stat_oerrors, 1);
+		atomic_add_64(&sc->ure_stat_oerrors, npkts);
 		usb_free_bulk_req(req);
 		mutex_enter(&sc->ure_tx_lock);
 		sc->ure_tx_busy = B_FALSE;
