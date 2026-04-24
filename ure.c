@@ -1456,6 +1456,14 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 	    ure_phy_read(sc, URE_OCP_POWER_CFG) |
 	    URE_EN_ALDPS);
 
+	if (sc->ure_flags & URE_FLAG_8157) {
+		/* Clear SDR */
+		URE_SETBIT_1(sc, 0xd378, URE_MCU_TYPE_USB,
+		    0x0080);
+		URE_CLRBIT_2(sc, 0xcd06, URE_MCU_TYPE_USB,
+		    0x8000);
+	}
+
 	if ((sc->ure_chip & (URE_CHIP_VER_5C20 |
 	    URE_CHIP_VER_5C30)) ||
 	    (sc->ure_flags & (URE_FLAG_8156 |
