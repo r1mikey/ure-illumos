@@ -182,7 +182,6 @@ typedef struct ure_softc {
 
 	/* RX state */
 	boolean_t		ure_rx_running;
-	usb_bulk_req_t		*ure_rx_req;
 
 	/* TX state */
 	boolean_t		ure_tx_busy;
