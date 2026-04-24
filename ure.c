@@ -203,6 +203,10 @@ static void	*ure_statep;
  * Get the actual USB connection speed for this device.
  * Returns one of USBA_LOW_SPEED_DEV, USBA_FULL_SPEED_DEV,
  * USBA_HIGH_SPEED_DEV, or USBA_SUPER_SPEED_DEV.
+ *
+ * There is no public USBA API to query device speed, so we access
+ * usba_device_t internals directly.  This is a common pattern in
+ * illumos USB drivers (see usbgem, usbecm, etc.).
  */
 static usb_port_status_t
 ure_dev_speed(ure_softc_t *sc)
