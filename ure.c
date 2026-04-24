@@ -1789,8 +1789,12 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	}
 
 	/* Pass received chain to MAC */
-	if (head != NULL)
-		mac_rx(sc->ure_mh, NULL, head);
+	if (head != NULL) {
+		if (sc->ure_running)
+			mac_rx(sc->ure_mh, NULL, head);
+		else
+			freemsgchain(head);
+	}
 
 restart:
 	/* Resubmit RX */
