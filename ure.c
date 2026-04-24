@@ -2352,6 +2352,8 @@ ure_chip_init(ure_softc_t *sc)
 {
 	uint16_t ver;
 
+	sc->ure_chip = 0;
+
 	sc->ure_phy_read = ure_ocp_reg_read;
 	sc->ure_phy_write = ure_ocp_reg_write;
 
@@ -2450,7 +2452,7 @@ ure_chip_init(ure_softc_t *sc)
 		break;
 	case 0x7420:
 		sc->ure_flags = URE_FLAG_8156B;
-		sc->ure_chip = URE_CHIP_VER_7420;
+		sc->ure_chip |= URE_CHIP_VER_7420;
 		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
 		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
