@@ -2292,17 +2292,49 @@ ure_reconnect_cb(dev_info_t *dip)
 {
 	ure_softc_t *sc;
 	int instance = ddi_get_instance(dip);
+	boolean_t was_running;
 
 	sc = ddi_get_soft_state(ure_statep, instance);
 	if (sc == NULL)
 		return (DDI_SUCCESS);
 
 	mutex_enter(&sc->ure_lock);
+	was_running = sc->ure_running;
 	sc->ure_gone = B_FALSE;
 	mutex_exit(&sc->ure_lock);
 
 	/* Re-initialise chip */
 	ure_chip_init(sc);
+
+	if (was_running) {
+		int error;
+
+		mutex_enter(&sc->ure_lock);
+
+		/* NIC reset */
+		if (sc->ure_flags & URE_FLAG_8152)
+			error = ure_rtl8152_nic_reset(sc);
+		else
+			error = ure_rtl8153_nic_reset(sc);
+
+		if (error != 0) {
+			mutex_exit(&sc->ure_lock);
+			dev_err(sc->ure_dip, CE_WARN,
+			    "NIC reset failed on reconnect");
+			return (DDI_SUCCESS);
+		}
+
+		/* Setup MAC, TX/RX, filters */
+		ure_ifmedia_init(sc);
+		ure_set_rx_filter(sc);
+
+		/* Start RX */
+		ure_rx_start(sc);
+
+		mutex_exit(&sc->ure_lock);
+
+		mac_link_update(sc->ure_mh, LINK_STATE_UNKNOWN);
+	}
 
 	return (DDI_SUCCESS);
 }
