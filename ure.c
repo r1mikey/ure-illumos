@@ -1933,167 +1933,229 @@ restart:
  * TX path
  */
 
+/*
+ * TX completion callback — called by USBA when a bulk OUT transfer
+ * completes (success or failure).  Updates statistics, detaches the
+ * pre-allocated aggregation mblk (so usb_free_bulk_req doesn't free
+ * it), returns the chain to the slab cache, and wakes the MAC
+ * framework if the TX pipeline was at capacity.
+ */
 static void
 ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 {
 	_NOTE(ARGUNUSED(ph));
-	ure_softc_t *sc = (ure_softc_t *)req->bulk_client_private;
+	ure_tx_chain_t *chain = (ure_tx_chain_t *)req->bulk_client_private;
+	ure_softc_t *sc = chain->uc_sc;
+	boolean_t was_full, do_update;
 
-	if (req->bulk_completion_reason != USB_CR_OK)
-		atomic_add_64(&sc->ure_stat_oerrors, 1);
+	/* Stats on completion — correct semantics */
+	if (req->bulk_completion_reason == USB_CR_OK) {
+		atomic_add_64(&sc->ure_stat_opackets, chain->uc_npkts);
+		atomic_add_64(&sc->ure_stat_obytes, chain->uc_nbytes);
+	} else {
+		atomic_add_64(&sc->ure_stat_oerrors, chain->uc_npkts);
+	}
 
+	/* Detach our mblk before USBA frees it */
+	req->bulk_data = NULL;
 	usb_free_bulk_req(req);
 
+	/* Reset mblk for reuse, return chain to slab */
+	chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
+	kmem_cache_free(sc->ure_tx_cache, chain);
+
+	/* Wake MAC if was at capacity */
 	mutex_enter(&sc->ure_tx_lock);
-	sc->ure_tx_busy = B_FALSE;
+	was_full = (sc->ure_tx_cnt >= URE_TX_MAX);
+	sc->ure_tx_cnt--;
 	mutex_exit(&sc->ure_tx_lock);
 
-	if (sc->ure_running && !sc->ure_gone)
-		mac_tx_update(sc->ure_mh);
+	if (was_full) {
+		mutex_enter(&sc->ure_lock);
+		do_update = sc->ure_running && !sc->ure_gone;
+		mutex_exit(&sc->ure_lock);
+		if (do_update)
+			mac_tx_update(sc->ure_mh);
+	}
 }
 
 /*
  * mc_tx callback — transmit a chain of mblk_t packets.
- * Aggregates multiple packets into a single USB bulk OUT
- * transfer with per-packet ure_txpkt headers.
+ *
+ * Packs multiple Ethernet frames into pre-allocated aggregation
+ * buffers (one per USB bulk OUT transfer), with per-packet TX
+ * headers.  Up to URE_TX_MAX transfers may be in flight
+ * concurrently; when all slots are occupied the remaining mblk
+ * chain is returned to MAC as backpressure.
+ *
+ * The packing loop runs with no lock held.  Only the brief
+ * counter check (ure_tx_lock) and the USB submit (ure_tx_ser)
+ * are serialised.  Original mblks are freed only after a
+ * successful USB submit; on failure the entire packed+remaining
+ * chain is returned to MAC.
  */
 static mblk_t *
 ure_m_tx(void *arg, mblk_t *mp)
 {
 	ure_softc_t *sc = (ure_softc_t *)arg;
-	mblk_t *txdata;
-	usb_bulk_req_t *req;
-	uint32_t txbufsz;
 	uint32_t hdrsize, pkt_align;
-	unsigned char *buf;
-	uint32_t pos = 0;
-	int npkts = 0;
 
+	/* 1. State check under ure_lock (brief, no USB I/O) */
+	mutex_enter(&sc->ure_lock);
 	if (sc->ure_gone || !sc->ure_running ||
 	    !(sc->ure_flags & URE_FLAG_LINK)) {
-		int ndrop = 0;
-		mblk_t *m;
-		for (m = mp; m != NULL; m = m->b_next)
-			ndrop++;
-		atomic_add_64(&sc->ure_stat_oerrors, ndrop);
+		mutex_exit(&sc->ure_lock);
 		freemsgchain(mp);
 		return (NULL);
 	}
+	mutex_exit(&sc->ure_lock);
 
-	mutex_enter(&sc->ure_tx_lock);
-	if (sc->ure_tx_busy) {
-		mutex_exit(&sc->ure_tx_lock);
-		return (mp);
-	}
-	sc->ure_tx_busy = B_TRUE;
-	mutex_exit(&sc->ure_tx_lock);
-
-	txbufsz = sc->ure_txbufsz;
 	hdrsize = (sc->ure_flags & URE_FLAG_8157) ?
 	    sizeof (ure_txpkt_v2_t) : sizeof (ure_txpkt_t);
 	pkt_align = (sc->ure_flags & URE_FLAG_8157) ?
 	    URE_8157_BUF_ALIGN : URE_TX_BUF_ALIGN;
 
-	txdata = allocb(txbufsz, BPRI_MED);
-	if (txdata == NULL) {
-		atomic_add_64(&sc->ure_stat_oerrors, 1);
-		mutex_enter(&sc->ure_tx_lock);
-		sc->ure_tx_busy = B_FALSE;
-		mutex_exit(&sc->ure_tx_lock);
-		return (mp);
-	}
-
-	buf = txdata->b_wptr;
-
+	/* 2. Loop: fill as many TX slots as available */
 	while (mp != NULL) {
-		mblk_t *next = mp->b_next;
-		mp->b_next = NULL;
+		ure_tx_chain_t *chain;
+		usb_bulk_req_t *req;
+		unsigned char *buf;
+		uint32_t pos = 0;
+		mblk_t *packed_head;
+		int rval;
 
-		uint32_t mlen = msgsize(mp);
+		/* 2a. Admission check under ure_tx_lock */
+		mutex_enter(&sc->ure_tx_lock);
+		if (sc->ure_tx_cnt >= URE_TX_MAX) {
+			mutex_exit(&sc->ure_tx_lock);
+			break;		/* backpressure */
+		}
+		sc->ure_tx_cnt++;
+		mutex_exit(&sc->ure_tx_lock);
 
-		/* Check if this packet fits */
-		uint32_t aligned_pos = P2ROUNDUP(pos, pkt_align);
-		if (aligned_pos + hdrsize + mlen > txbufsz) {
-			mp->b_next = next;
+		/* 2b. Get a chain from the slab (no lock held) */
+		chain = kmem_cache_alloc(sc->ure_tx_cache, KM_NOSLEEP);
+		if (chain == NULL) {
+			mutex_enter(&sc->ure_tx_lock);
+			sc->ure_tx_cnt--;
+			mutex_exit(&sc->ure_tx_lock);
+			break;		/* backpressure */
+		}
+
+		/* 2c. Pack aggregated frames (no lock held) */
+		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
+		chain->uc_npkts = 0;
+		chain->uc_nbytes = 0;
+		packed_head = mp;
+		buf = chain->uc_buf->b_rptr;
+
+		while (mp != NULL) {
+			uint32_t mlen = msgsize(mp);
+			uint32_t aligned_pos = P2ROUNDUP(pos, pkt_align);
+
+			/* Does this packet fit? */
+			if (aligned_pos + hdrsize + mlen >
+			    chain->uc_bufmax)
+				break;
+
+			pos = aligned_pos;
+
+			/* Write TX header */
+			if (sc->ure_flags & URE_FLAG_8157) {
+				ure_txpkt_v2_t txhdr;
+				bzero(&txhdr, sizeof (txhdr));
+				txhdr.ure_cmdstat = LE_32(
+				    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
+				txhdr.ure_pktlen = LE_32(mlen << 4);
+				txhdr.ure_signature = LE_32(
+				    URE_TXPKT_SIGNATURE);
+				bcopy(&txhdr, buf + pos, sizeof (txhdr));
+			} else {
+				ure_txpkt_t txhdr;
+				bzero(&txhdr, sizeof (txhdr));
+				txhdr.ure_pktlen = LE_32(mlen |
+				    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
+				bcopy(&txhdr, buf + pos, sizeof (txhdr));
+			}
+			pos += hdrsize;
+
+			/* Copy packet data (handle b_cont chains) */
+			mblk_t *m;
+			for (m = mp; m != NULL; m = m->b_cont) {
+				uint32_t len = MBLKL(m);
+				if (len > 0) {
+					bcopy(m->b_rptr, buf + pos, len);
+					pos += len;
+				}
+			}
+
+			chain->uc_npkts++;
+			chain->uc_nbytes += mlen;
+			mp = mp->b_next;
+		}
+		/* mp now points to first un-packed packet (or NULL) */
+
+		if (chain->uc_npkts == 0) {
+			/* Nothing fit (single oversized frame?) */
+			kmem_cache_free(sc->ure_tx_cache, chain);
+			mutex_enter(&sc->ure_tx_lock);
+			sc->ure_tx_cnt--;
+			mutex_exit(&sc->ure_tx_lock);
 			break;
 		}
-		pos = aligned_pos;
 
-		/* Write TX header */
-		if (sc->ure_flags & URE_FLAG_8157) {
-			ure_txpkt_v2_t txhdr;
-			bzero(&txhdr, sizeof (txhdr));
-			txhdr.ure_cmdstat = LE_32(
-			    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
-			txhdr.ure_pktlen = LE_32(mlen << 4);
-			txhdr.ure_signature = LE_32(
-			    URE_TXPKT_SIGNATURE);
-			bcopy(&txhdr, buf + pos, sizeof (txhdr));
-		} else {
-			ure_txpkt_t txhdr;
-			bzero(&txhdr, sizeof (txhdr));
-			txhdr.ure_pktlen = LE_32(mlen |
-			    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
-			bcopy(&txhdr, buf + pos, sizeof (txhdr));
+		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr + pos;
+
+		/* 2d. Allocate the USBA bulk req (no lock held) */
+		req = usb_alloc_bulk_req(sc->ure_dip, 0,
+		    USB_FLAGS_NOSLEEP);
+		if (req == NULL) {
+			kmem_cache_free(sc->ure_tx_cache, chain);
+			mutex_enter(&sc->ure_tx_lock);
+			sc->ure_tx_cnt--;
+			mutex_exit(&sc->ure_tx_lock);
+			mp = packed_head;	/* return all */
+			break;
 		}
-		pos += hdrsize;
 
-		/* Copy packet data (handle chained mblks) */
-		mblk_t *m;
-		for (m = mp; m != NULL; m = m->b_cont) {
-			uint32_t len = MBLKL(m);
-			if (len > 0) {
-				bcopy(m->b_rptr, buf + pos, len);
-				pos += len;
+		req->bulk_data = chain->uc_buf;
+		req->bulk_len = MBLKL(chain->uc_buf);
+		req->bulk_timeout = 5;
+		req->bulk_cb = ure_tx_cb;
+		req->bulk_exc_cb = ure_tx_cb;
+		req->bulk_client_private = (usb_opaque_t)chain;
+		req->bulk_attributes = USB_ATTRS_AUTOCLEARING;
+
+		/* 2e. Serialize the USB submit */
+		(void) usb_serialize_access(sc->ure_tx_ser,
+		    USB_WAIT, 0);
+		rval = usb_pipe_bulk_xfer(sc->ure_bulkout_pipe,
+		    req, USB_FLAGS_NOSLEEP);
+		usb_release_access(sc->ure_tx_ser);
+
+		if (rval != USB_SUCCESS) {
+			req->bulk_data = NULL;	/* detach our mblk */
+			usb_free_bulk_req(req);
+			kmem_cache_free(sc->ure_tx_cache, chain);
+			mutex_enter(&sc->ure_tx_lock);
+			sc->ure_tx_cnt--;
+			mutex_exit(&sc->ure_tx_lock);
+			mp = packed_head;	/* give everything back */
+			break;
+		}
+
+		/* 2f. Submit succeeded — free the packed mblks */
+		{
+			mblk_t *m = packed_head;
+			while (m != mp) {
+				mblk_t *next = m->b_next;
+				m->b_next = NULL;
+				freemsg(m);
+				m = next;
 			}
 		}
 
-		atomic_add_64(&sc->ure_stat_opackets, 1);
-		atomic_add_64(&sc->ure_stat_obytes, mlen);
-		npkts++;
-
-		freemsg(mp);
-		mp = next;
-	}
-
-	if (pos == 0) {
-		/* Nothing was packed */
-		freemsg(txdata);
-		mutex_enter(&sc->ure_tx_lock);
-		sc->ure_tx_busy = B_FALSE;
-		mutex_exit(&sc->ure_tx_lock);
-		return (mp);
-	}
-
-	txdata->b_wptr = txdata->b_rptr + pos;
-
-	/* Submit the bulk OUT transfer */
-	req = usb_alloc_bulk_req(sc->ure_dip, 0,
-	    USB_FLAGS_NOSLEEP);
-	if (req == NULL) {
-		atomic_add_64(&sc->ure_stat_oerrors, npkts);
-		freemsg(txdata);
-		mutex_enter(&sc->ure_tx_lock);
-		sc->ure_tx_busy = B_FALSE;
-		mutex_exit(&sc->ure_tx_lock);
-		return (mp);
-	}
-
-	req->bulk_len = pos;
-	req->bulk_data = txdata;
-	req->bulk_cb = ure_tx_cb;
-	req->bulk_exc_cb = ure_tx_cb;
-	req->bulk_client_private = (usb_opaque_t)sc;
-	req->bulk_timeout = 10;
-	req->bulk_attributes = USB_ATTRS_AUTOCLEARING;
-
-	if (usb_pipe_bulk_xfer(sc->ure_bulkout_pipe, req, 0) !=
-	    USB_SUCCESS) {
-		atomic_add_64(&sc->ure_stat_oerrors, npkts);
-		usb_free_bulk_req(req);
-		mutex_enter(&sc->ure_tx_lock);
-		sc->ure_tx_busy = B_FALSE;
-		mutex_exit(&sc->ure_tx_lock);
+		/* Loop back to 2a for remaining mp */
 	}
 
 	return (mp);
@@ -2198,11 +2260,21 @@ ure_m_stop(void *arg)
 	/* Reset the chip to stop RX/TX */
 	ure_reset(sc);
 
-	/* Drain pipes */
+	/*
+	 * Drain pipes.  usb_pipe_reset(USB_FLAGS_SLEEP) waits for
+	 * all in-flight transfers to complete and their callbacks
+	 * to return before it returns.  The callbacks will see
+	 * !ure_running under ure_lock and skip mac_tx_update.
+	 */
 	usb_pipe_reset(sc->ure_dip, sc->ure_bulkin_pipe,
 	    USB_FLAGS_SLEEP, NULL, 0);
 	usb_pipe_reset(sc->ure_dip, sc->ure_bulkout_pipe,
 	    USB_FLAGS_SLEEP, NULL, 0);
+
+	/* Verify all TX transfers drained */
+	mutex_enter(&sc->ure_tx_lock);
+	ASSERT(sc->ure_tx_cnt == 0);
+	mutex_exit(&sc->ure_tx_lock);
 }
 
 static int
