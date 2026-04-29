@@ -176,6 +176,10 @@ static int	ure_reconnect_cb(dev_info_t *);
 static int	ure_open_pipes(ure_softc_t *);
 static void	ure_close_pipes(ure_softc_t *);
 
+/* TX chain kmem_cache constructor/destructor */
+static int	ure_tx_chain_construct(void *, void *, int);
+static void	ure_tx_chain_destroy(void *, void *);
+
 /* Register access and PHY primitives (used by macros in ure.h) */
 static int	ure_ctl(ure_softc_t *, uint8_t, uint16_t, uint16_t,
 		    void *, int);
@@ -2365,6 +2369,44 @@ ure_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 }
 
 /*
+ * TX chain kmem_cache constructor — pre-allocates the aggregation
+ * buffer so the TX hot path never calls allocb().
+ */
+static int
+ure_tx_chain_construct(void *buf, void *arg, int kmflags)
+{
+	ure_tx_chain_t *chain = (ure_tx_chain_t *)buf;
+	ure_softc_t *sc = (ure_softc_t *)arg;
+
+	chain->uc_sc = sc;
+	chain->uc_bufmax = sc->ure_txbufsz;
+	chain->uc_buf = allocb(chain->uc_bufmax,
+	    (kmflags == KM_SLEEP) ? BPRI_LO : BPRI_MED);
+	if (chain->uc_buf == NULL)
+		return (-1);
+	chain->uc_npkts = 0;
+	chain->uc_nbytes = 0;
+
+	return (0);
+}
+
+/*
+ * TX chain kmem_cache destructor — frees the pre-allocated
+ * aggregation buffer.
+ */
+static void
+ure_tx_chain_destroy(void *buf, void *arg)
+{
+	_NOTE(ARGUNUSED(arg));
+	ure_tx_chain_t *chain = (ure_tx_chain_t *)buf;
+
+	if (chain->uc_buf != NULL) {
+		freemsg(chain->uc_buf);
+		chain->uc_buf = NULL;
+	}
+}
+
+/*
  * USB pipe management
  */
 
@@ -2374,6 +2416,7 @@ ure_open_pipes(ure_softc_t *sc)
 	usb_pipe_policy_t policy;
 	int ret;
 
+	/* Bulk IN — modest concurrency (single RX at a time) */
 	bzero(&policy, sizeof (policy));
 	policy.pp_max_async_reqs = 2;
 
@@ -2385,6 +2428,10 @@ ure_open_pipes(ure_softc_t *sc)
 		    "failed to open bulk IN pipe: %d", ret);
 		return (DDI_FAILURE);
 	}
+
+	/* Bulk OUT — URE_TX_MAX concurrent transfers + headroom */
+	bzero(&policy, sizeof (policy));
+	policy.pp_max_async_reqs = URE_TX_MAX + 4;
 
 	ret = usb_pipe_xopen(sc->ure_dip,
 	    &sc->ure_bulkout_xdesc, &policy,
@@ -2668,6 +2715,19 @@ ure_cleanup(ure_softc_t *sc)
 
 	ure_close_pipes(sc);
 
+	/* Tear down TX cache and serializer (before mutexes) */
+	if (sc->ure_attach_seq & URE_ATTACH_TX_CACHE) {
+		kmem_cache_destroy(sc->ure_tx_cache);
+		sc->ure_tx_cache = NULL;
+		sc->ure_attach_seq &= ~URE_ATTACH_TX_CACHE;
+	}
+
+	if (sc->ure_attach_seq & URE_ATTACH_TX_SER) {
+		usb_fini_serialization(sc->ure_tx_ser);
+		sc->ure_tx_ser = NULL;
+		sc->ure_attach_seq &= ~URE_ATTACH_TX_SER;
+	}
+
 	/* Free multicast address list */
 	{
 		ure_mcast_entry_t *me;
@@ -2795,6 +2855,24 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	/* Step 5: Identify and initialise chip */
 	ure_chip_init(sc);
 	sc->ure_attach_seq |= URE_ATTACH_CHIP_INIT;
+
+	/* Step 5a: Initialise TX serializer */
+	sc->ure_tx_ser = usb_init_serialization(dip,
+	    USB_INIT_SER_CHECK_SAME_THREAD);
+	sc->ure_tx_cnt = 0;
+	sc->ure_attach_seq |= URE_ATTACH_TX_SER;
+
+	/* Step 5b: Create TX chain kmem_cache (needs ure_txbufsz) */
+	{
+		char cache_name[64];
+		(void) snprintf(cache_name, sizeof (cache_name),
+		    "ure_tx_chain_%d", instance);
+		sc->ure_tx_cache = kmem_cache_create(cache_name,
+		    sizeof (ure_tx_chain_t), 0,
+		    ure_tx_chain_construct, ure_tx_chain_destroy,
+		    NULL, (void *)sc, NULL, 0);
+	}
+	sc->ure_attach_seq |= URE_ATTACH_TX_CACHE;
 
 	/* Step 6: Read MAC address */
 	if (sc->ure_chip & (URE_CHIP_VER_4C00 |

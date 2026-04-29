@@ -119,6 +119,8 @@ extern "C" {
 #define	URE_ATTACH_MAC_REG	0x0020	/* mac_register done */
 #define	URE_ATTACH_USB_EVT	0x0040	/* usb event cbs registered */
 #define	URE_ATTACH_LINK_TIMER	0x0080	/* link poll timer running */
+#define	URE_ATTACH_TX_SER	0x0100	/* TX serializer initialised */
+#define	URE_ATTACH_TX_CACHE	0x0200	/* TX chain kmem_cache created */
 
 /*
  * Endpoint indices.
@@ -128,6 +130,13 @@ extern "C" {
 #define	URE_ENDPT_MAX		2
 
 /*
+ * Maximum concurrent TX transfers.  Each transfer carries an
+ * aggregation buffer with multiple packets, so even modest counts
+ * saturate the USB pipe.
+ */
+#define	URE_TX_MAX		32
+
+/*
  * Multicast address tracking entry.
  */
 typedef struct ure_mcast_entry {
@@ -135,14 +144,31 @@ typedef struct ure_mcast_entry {
 	uint8_t			addr[ETHERADDRL];
 } ure_mcast_entry_t;
 
+/* Forward declaration for ure_tx_chain_t */
+struct ure_softc;
+
+/*
+ * TX chain — one per in-flight USB bulk OUT transfer.
+ * The aggregation buffer (uc_buf) is pre-allocated by the
+ * kmem_cache constructor and reused across submits.
+ */
+typedef struct ure_tx_chain {
+	struct ure_softc	*uc_sc;
+	mblk_t			*uc_buf;	/* pre-allocated agg buffer */
+	uint32_t		uc_bufmax;	/* buffer capacity */
+	int			uc_npkts;	/* packets packed this submit */
+	uint64_t		uc_nbytes;	/* total bytes packed */
+} ure_tx_chain_t;
+
 /*
  * Per-instance softstate.
  *
- * Mutex ordering:
- *   ure_lock	— protects softstate, link state, chip registers
- *   ure_tx_lock — protects TX path (ure_tx_busy, pipe writes)
- *
- * ure_lock must be acquired before ure_tx_lock if both are needed.
+ * Lock discipline:
+ *   ure_lock    — protects softstate, link state, flags, RX path,
+ *                 multicast hash, chip registers.  Never held during
+ *                 bulk USB I/O.
+ *   ure_tx_lock — protects ure_tx_cnt (TX in-flight counter) only.
+ *                 Brief hold; never held simultaneously with ure_lock.
  */
 typedef struct ure_softc {
 	dev_info_t		*ure_dip;
@@ -194,10 +220,14 @@ typedef struct ure_softc {
 
 	/* TX state */
 	boolean_t		ure_tx_busy;
+	kmem_cache_t		*ure_tx_cache;	/* slab cache for tx chains */
+	usb_serialization_t	ure_tx_ser;	/* serializer for pipe submit */
+	uint_t			ure_tx_cnt;	/* xfers in flight (tx_lock) */
 
 	/* Device online/offline */
 	boolean_t		ure_running;	/* mc_start called */
 	boolean_t		ure_gone;	/* USB disconnect */
+	boolean_t		ure_was_running; /* saved for reconnect */
 
 	/* Statistics */
 	uint64_t		ure_stat_ierrors;
