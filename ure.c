@@ -2553,6 +2553,7 @@ ure_disconnect_cb(dev_info_t *dip)
 		return (DDI_SUCCESS);
 
 	mutex_enter(&sc->ure_lock);
+	sc->ure_was_running = sc->ure_running;	/* save BEFORE clearing */
 	sc->ure_gone = B_TRUE;
 	sc->ure_running = B_FALSE;
 	sc->ure_link_state = LINK_STATE_DOWN;
@@ -2575,8 +2576,9 @@ ure_reconnect_cb(dev_info_t *dip)
 		return (DDI_SUCCESS);
 
 	mutex_enter(&sc->ure_lock);
-	was_running = sc->ure_running;
 	sc->ure_gone = B_FALSE;
+	was_running = sc->ure_was_running;
+	sc->ure_was_running = B_FALSE;
 	mutex_exit(&sc->ure_lock);
 
 	/* Re-initialise chip */
