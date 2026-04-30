@@ -787,17 +787,19 @@ ure_wait_for_flash(ure_softc_t *sc)
 static void
 ure_rxvlan(ure_softc_t *sc)
 {
+	/*
+	 * Disable hardware VLAN tag stripping.  The illumos MAC framework
+	 * expects VLAN tags to be present in-band in the Ethernet frame;
+	 * there is no out-of-band mechanism to pass a stripped tag to
+	 * mac_rx().  Leave stripping disabled so tagged frames are
+	 * delivered intact and the MAC framework handles VLAN demux.
+	 */
 	if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B |
 	    URE_FLAG_8157)) {
-		uint16_t reg;
-		reg = ure_read_2(sc, URE_PLA_RCR1,
-		    URE_MCU_TYPE_PLA);
-		reg &= ~(URE_INNER_VLAN | URE_OUTER_VLAN);
-		reg |= (URE_INNER_VLAN | URE_OUTER_VLAN);
-		ure_write_2(sc, URE_PLA_RCR1,
-		    URE_MCU_TYPE_PLA, reg);
+		URE_CLRBIT_2(sc, URE_PLA_RCR1, URE_MCU_TYPE_PLA,
+		    URE_INNER_VLAN | URE_OUTER_VLAN);
 	} else {
-		URE_SETBIT_2(sc, URE_PLA_CPCR, URE_MCU_TYPE_PLA,
+		URE_CLRBIT_2(sc, URE_PLA_CPCR, URE_MCU_TYPE_PLA,
 		    URE_CPCR_RX_VLAN);
 	}
 }
