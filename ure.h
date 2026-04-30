@@ -222,6 +222,7 @@ typedef struct ure_softc {
 	kmem_cache_t		*ure_tx_cache;	/* slab cache for tx chains */
 	usb_serialization_t	ure_tx_ser;	/* serializer for pipe submit */
 	uint_t			ure_tx_cnt;	/* xfers in flight (tx_lock) */
+	hrtime_t		ure_tx_watchdog; /* stuck TX detection (tx_lock) */
 
 	/* Device online/offline */
 	boolean_t		ure_running;	/* mc_start called */

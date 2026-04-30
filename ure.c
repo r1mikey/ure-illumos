@@ -1717,6 +1717,34 @@ ure_link_check(void *arg)
 	} else {
 		mutex_exit(&sc->ure_lock);
 	}
+
+	/*
+	 * TX watchdog — detect transfers stuck beyond the bulk_timeout.
+	 * The 15-second threshold is 3× the 5-second bulk_timeout; if
+	 * USBA's exception callback hasn't fired by now, something is
+	 * genuinely wedged and a pipe reset is the only recovery.
+	 */
+	mutex_enter(&sc->ure_tx_lock);
+	if (sc->ure_tx_cnt > 0) {
+		if (sc->ure_tx_watchdog == 0) {
+			sc->ure_tx_watchdog = gethrtime();
+		} else if (gethrtime() - sc->ure_tx_watchdog >
+		    15 * NANOSEC) {
+			uint_t stuck = sc->ure_tx_cnt;
+			sc->ure_tx_watchdog = 0;
+			mutex_exit(&sc->ure_tx_lock);
+			dev_err(sc->ure_dip, CE_WARN,
+			    "TX watchdog: %u transfers stuck for "
+			    ">15s, resetting pipe", stuck);
+			usb_pipe_reset(sc->ure_dip,
+			    sc->ure_bulkout_pipe,
+			    USB_FLAGS_SLEEP, NULL, 0);
+			return;
+		}
+	} else {
+		sc->ure_tx_watchdog = 0;
+	}
+	mutex_exit(&sc->ure_tx_lock);
 }
 
 /*
