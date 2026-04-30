@@ -1856,16 +1856,20 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	mblk_t *head = NULL, *tail = NULL;
 	uint32_t total_len;
 	uint32_t hdrsize, align;
+	boolean_t running;
 	int pktlen;
 
-	if (sc->ure_gone || !sc->ure_running) {
-		usb_free_bulk_req(req);
-		mutex_enter(&sc->ure_lock);
+	/* Snapshot state under lock to avoid bare-read races */
+	mutex_enter(&sc->ure_lock);
+	running = sc->ure_running && !sc->ure_gone;
+	if (!running) {
 		ASSERT(sc->ure_rx_cnt > 0);
 		sc->ure_rx_cnt--;
 		mutex_exit(&sc->ure_lock);
+		usb_free_bulk_req(req);
 		return;
 	}
+	mutex_exit(&sc->ure_lock);
 
 	if (req->bulk_completion_reason != USB_CR_OK) {
 		if (req->bulk_completion_reason != USB_CR_STOPPED_POLLING)
@@ -2002,7 +2006,7 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 
 	/* Pass received chain to MAC */
 	if (head != NULL) {
-		if (sc->ure_running)
+		if (running)
 			mac_rx(sc->ure_mh, NULL, head);
 		else
 			freemsgchain(head);
