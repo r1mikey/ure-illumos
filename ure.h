@@ -220,7 +220,7 @@ typedef struct ure_softc {
 	uint32_t		ure_mtu;
 
 	/* RX state */
-	boolean_t		ure_rx_running;
+	uint_t			ure_rx_cnt;	/* bulk-IN xfers in flight */
 
 	/* TX state */
 	kmem_cache_t		*ure_tx_cache;	/* slab cache for tx chains */

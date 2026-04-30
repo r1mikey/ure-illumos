@@ -1805,37 +1805,40 @@ ure_set_rx_filter(ure_softc_t *sc)
 static void
 ure_rx_start(ure_softc_t *sc)
 {
-	usb_bulk_req_t *req;
-
 	ASSERT(MUTEX_HELD(&sc->ure_lock));
 
-	if (sc->ure_gone || !sc->ure_running || sc->ure_rx_running)
-		return;
+	while (sc->ure_rx_cnt < URE_RX_LIST_CNT) {
+		usb_bulk_req_t *req;
 
-	req = usb_alloc_bulk_req(sc->ure_dip,
-	    sc->ure_rxbufsz, USB_FLAGS_NOSLEEP);
-	if (req == NULL) {
-		dev_err(sc->ure_dip, CE_WARN,
-		    "failed to allocate bulk RX request");
-		return;
-	}
+		if (sc->ure_gone || !sc->ure_running)
+			return;
 
-	req->bulk_len = sc->ure_rxbufsz;
-	req->bulk_cb = ure_rx_cb;
-	req->bulk_exc_cb = ure_rx_cb;
-	req->bulk_client_private = (usb_opaque_t)sc;
-	req->bulk_timeout = 0;
-	req->bulk_attributes = USB_ATTRS_SHORT_XFER_OK |
-	    USB_ATTRS_AUTOCLEARING;
+		req = usb_alloc_bulk_req(sc->ure_dip,
+		    sc->ure_rxbufsz, USB_FLAGS_NOSLEEP);
+		if (req == NULL) {
+			dev_err(sc->ure_dip, CE_WARN,
+			    "failed to allocate bulk RX request");
+			return;
+		}
 
-	sc->ure_rx_running = B_TRUE;
+		req->bulk_len = sc->ure_rxbufsz;
+		req->bulk_cb = ure_rx_cb;
+		req->bulk_exc_cb = ure_rx_cb;
+		req->bulk_client_private = (usb_opaque_t)sc;
+		req->bulk_timeout = 0;
+		req->bulk_attributes = USB_ATTRS_SHORT_XFER_OK |
+		    USB_ATTRS_AUTOCLEARING;
 
-	if (usb_pipe_bulk_xfer(sc->ure_bulkin_pipe, req, 0) !=
-	    USB_SUCCESS) {
-		dev_err(sc->ure_dip, CE_WARN,
-		    "failed to start bulk RX transfer");
-		usb_free_bulk_req(req);
-		sc->ure_rx_running = B_FALSE;
+		sc->ure_rx_cnt++;
+
+		if (usb_pipe_bulk_xfer(sc->ure_bulkin_pipe, req, 0) !=
+		    USB_SUCCESS) {
+			dev_err(sc->ure_dip, CE_WARN,
+			    "failed to start bulk RX transfer");
+			usb_free_bulk_req(req);
+			sc->ure_rx_cnt--;
+			return;
+		}
 	}
 }
 
@@ -1858,7 +1861,8 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	if (sc->ure_gone || !sc->ure_running) {
 		usb_free_bulk_req(req);
 		mutex_enter(&sc->ure_lock);
-		sc->ure_rx_running = B_FALSE;
+		ASSERT(sc->ure_rx_cnt > 0);
+		sc->ure_rx_cnt--;
 		mutex_exit(&sc->ure_lock);
 		return;
 	}
@@ -2012,7 +2016,8 @@ restart:
 		freemsg(data);
 
 	mutex_enter(&sc->ure_lock);
-	sc->ure_rx_running = B_FALSE;
+	ASSERT(sc->ure_rx_cnt > 0);
+	sc->ure_rx_cnt--;
 	if (sc->ure_running && !sc->ure_gone)
 		ure_rx_start(sc);
 	mutex_exit(&sc->ure_lock);
@@ -2415,6 +2420,11 @@ ure_m_stop(void *arg)
 	mutex_enter(&sc->ure_tx_lock);
 	ASSERT(sc->ure_tx_cnt == 0);
 	mutex_exit(&sc->ure_tx_lock);
+
+	/* Verify all RX transfers drained */
+	mutex_enter(&sc->ure_lock);
+	ASSERT(sc->ure_rx_cnt == 0);
+	mutex_exit(&sc->ure_lock);
 }
 
 static int
@@ -2684,9 +2694,9 @@ ure_open_pipes(ure_softc_t *sc)
 	usb_pipe_policy_t policy;
 	int ret;
 
-	/* Bulk IN — modest concurrency (single RX at a time) */
+	/* Bulk IN — URE_RX_LIST_CNT concurrent transfers + headroom */
 	bzero(&policy, sizeof (policy));
-	policy.pp_max_async_reqs = 2;
+	policy.pp_max_async_reqs = URE_RX_LIST_CNT + 2;
 
 	ret = usb_pipe_xopen(sc->ure_dip,
 	    &sc->ure_bulkin_xdesc, &policy,
