@@ -217,6 +217,7 @@ typedef struct ure_softc {
 	/* RX/TX buffer sizes (depend on chip variant and USB speed) */
 	uint32_t		ure_rxbufsz;
 	uint32_t		ure_txbufsz;
+	uint32_t		ure_mtu;
 
 	/* RX state */
 	boolean_t		ure_rx_running;

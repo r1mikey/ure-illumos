@@ -2540,8 +2540,42 @@ static int
 ure_m_getprop(void *arg, const char *pr_name,
     mac_prop_id_t pr_num, uint_t pr_valsize, void *pr_val)
 {
-	_NOTE(ARGUNUSED(arg, pr_name, pr_num, pr_valsize, pr_val));
-	return (ENOTSUP);
+	ure_softc_t *sc = (ure_softc_t *)arg;
+
+	_NOTE(ARGUNUSED(pr_name));
+
+	switch (pr_num) {
+	case MAC_PROP_DUPLEX:
+		ASSERT(pr_valsize >= sizeof (link_duplex_t));
+		bcopy(&sc->ure_link_duplex, pr_val,
+		    sizeof (link_duplex_t));
+		break;
+	case MAC_PROP_SPEED:
+		ASSERT(pr_valsize >= sizeof (uint64_t));
+		bcopy(&sc->ure_link_speed, pr_val, sizeof (uint64_t));
+		break;
+	case MAC_PROP_STATUS:
+		ASSERT(pr_valsize >= sizeof (link_state_t));
+		bcopy(&sc->ure_link_state, pr_val,
+		    sizeof (link_state_t));
+		break;
+	case MAC_PROP_AUTONEG:
+		*(uint8_t *)pr_val = 1;
+		break;
+	case MAC_PROP_FLOWCTRL: {
+		link_flowctrl_t fc = LINK_FLOWCTRL_NONE;
+		ASSERT(pr_valsize >= sizeof (link_flowctrl_t));
+		bcopy(&fc, pr_val, sizeof (fc));
+		break;
+	}
+	case MAC_PROP_MTU:
+		ASSERT(pr_valsize >= sizeof (uint32_t));
+		bcopy(&sc->ure_mtu, pr_val, sizeof (uint32_t));
+		break;
+	default:
+		return (ENOTSUP);
+	}
+	return (0);
 }
 
 static int
@@ -2556,7 +2590,30 @@ static void
 ure_m_propinfo(void *arg, const char *pr_name,
     mac_prop_id_t pr_num, mac_prop_info_handle_t prh)
 {
-	_NOTE(ARGUNUSED(arg, pr_name, pr_num, prh));
+	_NOTE(ARGUNUSED(arg, pr_name));
+
+	switch (pr_num) {
+	case MAC_PROP_DUPLEX:
+	case MAC_PROP_SPEED:
+	case MAC_PROP_STATUS:
+		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
+		break;
+	case MAC_PROP_AUTONEG:
+		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
+		mac_prop_info_set_default_uint8(prh, 1);
+		break;
+	case MAC_PROP_FLOWCTRL:
+		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
+		mac_prop_info_set_default_link_flowctrl(prh,
+		    LINK_FLOWCTRL_NONE);
+		break;
+	case MAC_PROP_MTU:
+		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
+		mac_prop_info_set_range_uint32(prh, ETHERMTU, ETHERMTU);
+		break;
+	default:
+		break;
+	}
 }
 
 static boolean_t
@@ -3176,6 +3233,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	macp->m_min_sdu = 0;
 	macp->m_max_sdu = ETHERMTU;
 	macp->m_margin = VLAN_TAGSZ;
+	sc->ure_mtu = ETHERMTU;
 
 	ret = mac_register(macp, &sc->ure_mh);
 	mac_free(macp);
