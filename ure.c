@@ -2975,6 +2975,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	mac_register_t *macp = NULL;
 	usb_ep_data_t *ep_data;
 	uint8_t eaddr[8];	/* 4-byte padded */
+	boolean_t was_running;
 	int ret;
 
 	switch (cmd) {
@@ -2984,10 +2985,49 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		sc = ddi_get_soft_state(ure_statep, instance);
 		if (sc == NULL)
 			return (DDI_FAILURE);
+
 		mutex_enter(&sc->ure_lock);
 		sc->ure_gone = B_FALSE;
+		was_running = sc->ure_was_running;
+		sc->ure_was_running = B_FALSE;
 		mutex_exit(&sc->ure_lock);
+
+		/* Reinitialise chip variant registers */
 		ure_chip_init(sc);
+
+		if (was_running) {
+			int error;
+
+			mutex_enter(&sc->ure_lock);
+
+			/* NIC reset */
+			if (sc->ure_flags & URE_FLAG_8152)
+				error = ure_rtl8152_nic_reset(sc);
+			else
+				error = ure_rtl8153_nic_reset(sc);
+
+			if (error != 0) {
+				mutex_exit(&sc->ure_lock);
+				dev_err(dip, CE_WARN,
+				    "NIC reset failed on resume");
+				return (DDI_SUCCESS);
+			}
+
+			/* Restore MAC, TX/RX config, filters */
+			ure_ifmedia_init(sc);
+			ure_set_rx_filter(sc);
+
+			sc->ure_running = B_TRUE;
+
+			/* Restart RX */
+			ure_rx_start(sc);
+
+			mutex_exit(&sc->ure_lock);
+
+			mac_link_update(sc->ure_mh,
+			    LINK_STATE_UNKNOWN);
+		}
+
 		return (DDI_SUCCESS);
 	default:
 		return (DDI_FAILURE);
@@ -3180,8 +3220,24 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		break;
 	case DDI_SUSPEND:
 		mutex_enter(&sc->ure_lock);
+		sc->ure_was_running = sc->ure_running;
+		sc->ure_running = B_FALSE;
 		sc->ure_gone = B_TRUE;
+		sc->ure_link_state = LINK_STATE_UNKNOWN;
 		mutex_exit(&sc->ure_lock);
+
+		/*
+		 * Reset the chip to quiesce DMA, then drain any
+		 * in-flight USB transfers.  The callbacks will see
+		 * !ure_running and skip mac_rx/mac_tx_update.
+		 */
+		ure_reset(sc);
+
+		usb_pipe_reset(sc->ure_dip, sc->ure_bulkin_pipe,
+		    USB_FLAGS_SLEEP, NULL, 0);
+		usb_pipe_reset(sc->ure_dip, sc->ure_bulkout_pipe,
+		    USB_FLAGS_SLEEP, NULL, 0);
+
 		return (DDI_SUCCESS);
 	default:
 		return (DDI_FAILURE);
