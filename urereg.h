@@ -665,6 +665,8 @@ typedef struct ure_txpkt {
 #define	URE_TXPKT_IPV4		(1U << 29)
 #define	URE_TXPKT_IPV6		(1U << 28)
 #define	URE_TXPKT_VLAN_TAG	(1U << 16)
+#define	URE_TXPKT_L4_OFFSET_SHIFT	17
+#define	URE_TXPKT_L4_OFFSET_MAX	0x7ff
 
 /* RX packet header v2 (RTL8157) */
 #pragma pack(1)

@@ -108,6 +108,8 @@
 #include <sys/ethernet.h>
 #include <sys/mac_provider.h>
 #include <sys/mac_ether.h>
+#include <sys/dlpi.h>
+#include <sys/pattr.h>
 #include <usb/usba/usbai_version.h>
 #include <sys/usb/usba.h>
 #include <sys/usb/usba/usba_types.h>
@@ -129,6 +131,13 @@
 #else
 #define	URE_DPRINTF(sc, fmt, ...)
 #endif
+
+/*
+ * RX checksum debug: when non-zero, print raw RX header DWORDs for the
+ * first N received packets to verify field mapping.  Set via mdb:
+ *   ure_rxcsum_debug/W 0t10
+ */
+static volatile int ure_rxcsum_debug = 0;
 
 /* Forward declarations */
 static int	ure_attach(dev_info_t *, ddi_attach_cmd_t);
@@ -1875,17 +1884,21 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 
 	while (total_len > hdrsize) {
 		mblk_t *mp;
+		uint32_t rxvlan = 0, rxcsum = 0;
 
 		if (sc->ure_flags & URE_FLAG_8157) {
 			ure_rxpkt_v2_t rxhdr;
 			bcopy(buf + off, &rxhdr, sizeof (rxhdr));
 			pktlen = (LE_32(rxhdr.ure_pktlen) &
 			    URE_RXPKT_V2_LEN_MASK) >> 17;
+			rxcsum = LE_32(rxhdr.ure_csum);
 		} else {
 			ure_rxpkt_t rxhdr;
 			bcopy(buf + off, &rxhdr, sizeof (rxhdr));
 			pktlen = LE_32(rxhdr.ure_pktlen) &
 			    URE_RXPKT_LEN_MASK;
+			rxvlan = LE_32(rxhdr.ure_vlan);
+			rxcsum = LE_32(rxhdr.ure_csum);
 		}
 
 		off += hdrsize;
@@ -1917,7 +1930,53 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 		bcopy(buf + off, mp->b_wptr, actual);
 		mp->b_wptr += actual;
 
-		/* TODO: Extract RX checksum results and VLAN tags */
+		/*
+		 * RX checksum offload.
+		 *
+		 * v1 (8152/8153/8153B/8156/8156B): protocol type bits
+		 * are in ure_vlan (DWORD 1), error flags in ure_csum
+		 * (DWORD 2).  Note the protocol type and error defines
+		 * share bit positions but apply to different fields.
+		 *
+		 * v2 (8157): both protocol type and error flags are in
+		 * ure_csum (DWORD 2) at non-overlapping bit positions.
+		 */
+		uint32_t hck_flags = 0;
+
+		if (sc->ure_flags & URE_FLAG_8157) {
+			if ((rxcsum & URE_RXPKT_V2_IPV4) &&
+			    !(rxcsum & URE_RXPKT_V2_IPSUMBAD))
+				hck_flags |= HCK_IPV4_HDRCKSUM_OK;
+			if ((rxcsum & (URE_RXPKT_V2_IPV4 |
+			    URE_RXPKT_V2_IPV6)) &&
+			    (((rxcsum & URE_RXPKT_V2_TCP) &&
+			    !(rxcsum & URE_RXPKT_V2_TCPSUMBAD)) ||
+			    ((rxcsum & URE_RXPKT_V2_UDP) &&
+			    !(rxcsum & URE_RXPKT_V2_UDPSUMBAD))))
+				hck_flags |= HCK_FULLCKSUM_OK;
+		} else {
+			if ((rxvlan & URE_RXPKT_IPV4) &&
+			    !(rxcsum & URE_RXPKT_IPSUMBAD))
+				hck_flags |= HCK_IPV4_HDRCKSUM_OK;
+			if ((rxvlan & (URE_RXPKT_IPV4 |
+			    URE_RXPKT_IPV6)) &&
+			    (((rxvlan & URE_RXPKT_TCP) &&
+			    !(rxcsum & URE_RXPKT_TCPSUMBAD)) ||
+			    ((rxvlan & URE_RXPKT_UDP) &&
+			    !(rxcsum & URE_RXPKT_UDPSUMBAD))))
+				hck_flags |= HCK_FULLCKSUM_OK;
+		}
+
+		if (hck_flags != 0)
+			mac_hcksum_set(mp, 0, 0, 0, 0, hck_flags);
+
+		if (ure_rxcsum_debug > 0) {
+			ure_rxcsum_debug--;
+			dev_err(sc->ure_dip, CE_NOTE,
+			    "!RX csum: vlan=0x%08x csum=0x%08x "
+			    "hck=0x%x pktlen=%d",
+			    rxvlan, rxcsum, hck_flags, pktlen);
+		}
 
 		/* Chain it */
 		if (head == NULL) {
@@ -2102,9 +2161,60 @@ ure_m_tx(void *arg, mblk_t *mp)
 				bcopy(&txhdr, buf + pos, sizeof (txhdr));
 			} else {
 				ure_txpkt_t txhdr;
+				uint32_t txcsum = 0;
+
 				bzero(&txhdr, sizeof (txhdr));
 				txhdr.ure_pktlen = LE_32(mlen |
 				    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
+
+				/*
+				 * TX checksum offload (v1 only).
+				 * Parse the Ethernet and IP headers to
+				 * determine L4 offset and protocol for
+				 * the hardware to compute the checksum.
+				 * IPv6 is not offloaded (advertised V4
+				 * only), so the stack computes it.
+				 */
+				uint32_t hck_flags;
+				mac_hcksum_get(mp, NULL, NULL, NULL, NULL,
+				    &hck_flags);
+				if (hck_flags & HCK_IPV4_HDRCKSUM)
+					txcsum |= URE_TXPKT_IPV4;
+				if (hck_flags & HCK_FULLCKSUM) {
+					struct ether_header *eh =
+					    (struct ether_header *)mp->b_rptr;
+					uint16_t etype = ntohs(eh->ether_type);
+					uint32_t l3off =
+					    sizeof (struct ether_header);
+
+					if (etype == ETHERTYPE_VLAN) {
+						etype = ntohs(*(uint16_t *)
+						    (mp->b_rptr + l3off + 2));
+						l3off += VLAN_TAGSZ;
+					}
+					if (etype == ETHERTYPE_IP) {
+						ipha_t *ipha = (ipha_t *)
+						    (mp->b_rptr + l3off);
+						uint32_t l4off = l3off +
+						    IPH_HDR_LENGTH(ipha);
+
+						txcsum |= URE_TXPKT_IPV4;
+						if (ipha->ipha_protocol ==
+						    IPPROTO_TCP)
+							txcsum |=
+							    URE_TXPKT_TCP;
+						else if (ipha->ipha_protocol ==
+						    IPPROTO_UDP)
+							txcsum |=
+							    URE_TXPKT_UDP;
+						txcsum |=
+						    (l4off &
+						    URE_TXPKT_L4_OFFSET_MAX) <<
+						    URE_TXPKT_L4_OFFSET_SHIFT;
+					}
+				}
+				txhdr.ure_vlan = LE_32(txcsum);
+
 				bcopy(&txhdr, buf + pos, sizeof (txhdr));
 			}
 			pos += hdrsize;
@@ -2457,13 +2567,8 @@ ure_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 	switch (cap) {
 	case MAC_CAPAB_HCKSUM: {
 		uint32_t *flags = (uint32_t *)cap_data;
-		/*
-		 * TODO: Enable hardware checksum offload.
-		 * The hardware supports it, but we need to
-		 * wire up the RX/TX checksum paths first.
-		 */
-		*flags = 0;
-		return (B_FALSE);
+		*flags = HCKSUM_IPHDRCKSUM | HCKSUM_INET_FULL_V4;
+		return (B_TRUE);
 	}
 	default:
 		return (B_FALSE);
