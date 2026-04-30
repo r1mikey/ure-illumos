@@ -202,6 +202,9 @@ typedef struct ure_softc {
 	uint_t			ure_flags;
 	uint_t			ure_chip;
 
+	/* Feature flags (from driver.conf) */
+	boolean_t		ure_hcksum_en;	/* HW checksum offload */
+
 	/* PHY access function pointers (per chip variant) */
 	uint16_t		(*ure_phy_read)(struct ure_softc *,
 				    uint16_t);

@@ -2562,11 +2562,15 @@ ure_m_propinfo(void *arg, const char *pr_name,
 static boolean_t
 ure_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 {
-	_NOTE(ARGUNUSED(arg));
+	ure_softc_t *sc = (ure_softc_t *)arg;
 
 	switch (cap) {
 	case MAC_CAPAB_HCKSUM: {
 		uint32_t *flags = (uint32_t *)cap_data;
+		if (!sc->ure_hcksum_en) {
+			*flags = 0;
+			return (B_FALSE);
+		}
 		*flags = HCKSUM_IPHDRCKSUM | HCKSUM_INET_FULL_V4;
 		return (B_TRUE);
 	}
@@ -3000,6 +3004,10 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	sc->ure_gone = B_FALSE;
 	sc->ure_running = B_FALSE;
 	sc->ure_link_state = LINK_STATE_UNKNOWN;
+
+	/* Read driver.conf tuneables */
+	sc->ure_hcksum_en = ddi_prop_get_int(DDI_DEV_T_ANY, dip,
+	    DDI_PROP_DONTPASS, "checksum", 1) != 0;
 	list_create(&sc->ure_mcast_list, sizeof (ure_mcast_entry_t),
 	    offsetof(ure_mcast_entry_t, node));
 
