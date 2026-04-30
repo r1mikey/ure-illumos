@@ -139,6 +139,9 @@
  */
 static volatile int ure_rxcsum_debug = 0;
 
+static const uint8_t ure_bcast_addr[ETHERADDRL] =
+	{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+
 /* Forward declarations */
 static int	ure_attach(dev_info_t *, ddi_attach_cmd_t);
 static int	ure_detach(dev_info_t *, ddi_detach_cmd_t);
@@ -1996,6 +1999,17 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 
 		atomic_add_64(&sc->ure_stat_ipackets, 1);
 		atomic_add_64(&sc->ure_stat_rbytes, actual);
+
+		/* Multicast/broadcast RX stats */
+		if (mp->b_rptr[0] & 0x01) {
+			if (bcmp(mp->b_rptr, ure_bcast_addr,
+			    ETHERADDRL) == 0)
+				atomic_add_64(
+				    &sc->ure_stat_brdcstrcv, 1);
+			else
+				atomic_add_64(
+				    &sc->ure_stat_multircv, 1);
+		}
 
 		uint32_t consumed = P2ROUNDUP(pktlen, align);
 		if (consumed > total_len)
