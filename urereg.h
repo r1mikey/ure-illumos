@@ -703,8 +703,7 @@ typedef struct ure_txpkt_v2 {
 /* ------------------------------------------------------------------ */
 /* Buffer sizes and alignment                                         */
 /* ------------------------------------------------------------------ */
-#define	URE_TX_LIST_CNT		1
-#define	URE_RX_LIST_CNT		2
+#define	URE_RX_LIST_CNT		10
 #define	URE_TX_BUF_ALIGN	4
 #define	URE_RX_BUF_ALIGN	8
 #define	URE_8157_BUF_ALIGN	16
