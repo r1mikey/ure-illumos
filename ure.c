@@ -164,6 +164,10 @@ static boolean_t	ure_m_getcapab(void *, mac_capab_t, void *);
 static void	ure_rx_start(ure_softc_t *);
 static void	ure_rx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
 static void	ure_tx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
+static void	ure_txc_submit(ure_softc_t *, ure_tx_chain_t *);
+static void	ure_txc_flush_locked(ure_softc_t *);
+static void	ure_txc_discard(ure_softc_t *);
+static void	ure_txc_timeout(void *);
 
 static void	ure_chip_init(ure_softc_t *);
 static void	ure_rtl8152_init(ure_softc_t *);
@@ -2092,19 +2096,171 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 }
 
 /*
- * mc_tx callback — transmit a chain of mblk_t packets.
+ * TX coalescing.
  *
- * Packs multiple Ethernet frames into pre-allocated aggregation
- * buffers (one per USB bulk OUT transfer), with per-packet TX
- * headers.  Up to URE_TX_MAX transfers may be in flight
- * concurrently; when all slots are occupied the remaining mblk
- * chain is returned to MAC as backpressure.
+ * USBA serialises bulk pipe submissions -- only one transfer is active
+ * on the wire at a time.  Without coalescing, MAC hands us one packet
+ * per mc_tx call and each ~1500-byte frame costs a full USB round-trip,
+ * capping throughput far below line rate.
  *
- * The packing loop runs with no lock held.  Only the brief
- * counter check (ure_tx_lock) and the USB submit (ure_tx_ser)
- * are serialised.  Original mblks are freed only after a
- * successful USB submit; on failure the entire packed+remaining
- * chain is returned to MAC.
+ * We solve this by accumulating packets in a coalescing buffer
+ * (ure_txc_chain) and flushing to USB either when the buffer is full
+ * or when a short timer fires.  This lets a single USB transfer carry
+ * tens of kilobytes of aggregated frames.
+ *
+ * Lock discipline:
+ *   ure_txc_lock protects ure_txc_chain, ure_txc_pos, ure_txc_tid.
+ *   Never held across USB I/O or untimeout() calls.
+ *   Lock order: ure_txc_lock -> ure_tx_lock.
+ */
+
+/*
+ * Submit a filled TX chain to USB.  Called with NO locks held.
+ * On failure the chain is freed and packets counted as oerrors.
+ */
+static void
+ure_txc_submit(ure_softc_t *sc, ure_tx_chain_t *chain)
+{
+	usb_bulk_req_t *req;
+	int rval;
+
+	req = usb_alloc_bulk_req(sc->ure_dip, 0, USB_FLAGS_NOSLEEP);
+	if (req == NULL) {
+		atomic_add_64(&sc->ure_stat_oerrors, chain->uc_npkts);
+		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
+		kmem_cache_free(sc->ure_tx_cache, chain);
+		mutex_enter(&sc->ure_tx_lock);
+		sc->ure_tx_cnt--;
+		mutex_exit(&sc->ure_tx_lock);
+		return;
+	}
+
+	req->bulk_data = chain->uc_buf;
+	req->bulk_len = MBLKL(chain->uc_buf);
+	req->bulk_timeout = 5;
+	req->bulk_cb = ure_tx_cb;
+	req->bulk_exc_cb = ure_tx_cb;
+	req->bulk_client_private = (usb_opaque_t)chain;
+	req->bulk_attributes = USB_ATTRS_AUTOCLEARING;
+
+	rval = usb_pipe_bulk_xfer(sc->ure_bulkout_pipe, req,
+	    USB_FLAGS_NOSLEEP);
+	if (rval != USB_SUCCESS) {
+		atomic_add_64(&sc->ure_stat_oerrors, chain->uc_npkts);
+		req->bulk_data = NULL;
+		usb_free_bulk_req(req);
+		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
+		kmem_cache_free(sc->ure_tx_cache, chain);
+		mutex_enter(&sc->ure_tx_lock);
+		sc->ure_tx_cnt--;
+		mutex_exit(&sc->ure_tx_lock);
+	}
+}
+
+/*
+ * Flush the coalescing buffer: detach it and submit to USB.
+ * Called with ure_txc_lock HELD; drops and reacquires it.
+ */
+static void
+ure_txc_flush_locked(ure_softc_t *sc)
+{
+	ure_tx_chain_t *chain;
+	timeout_id_t tid;
+
+	ASSERT(MUTEX_HELD(&sc->ure_txc_lock));
+
+	chain = sc->ure_txc_chain;
+	if (chain == NULL || chain->uc_npkts == 0) {
+		return;
+	}
+
+	/* Finalize the mblk length */
+	chain->uc_buf->b_wptr = chain->uc_buf->b_rptr + sc->ure_txc_pos;
+
+	/* Detach from coalescing state */
+	tid = sc->ure_txc_tid;
+	sc->ure_txc_chain = NULL;
+	sc->ure_txc_pos = 0;
+	sc->ure_txc_tid = 0;
+
+	mutex_exit(&sc->ure_txc_lock);
+
+	if (tid != 0) {
+		(void) untimeout(tid);
+	}
+
+	ure_txc_submit(sc, chain);
+
+	mutex_enter(&sc->ure_txc_lock);
+}
+
+/*
+ * Discard the coalescing buffer without submitting.
+ * Used during stop, suspend, and disconnect.
+ * Safe to call when there is no coalescing state.
+ */
+static void
+ure_txc_discard(ure_softc_t *sc)
+{
+	ure_tx_chain_t *chain;
+	timeout_id_t tid;
+
+	mutex_enter(&sc->ure_txc_lock);
+	chain = sc->ure_txc_chain;
+	tid = sc->ure_txc_tid;
+	sc->ure_txc_chain = NULL;
+	sc->ure_txc_pos = 0;
+	sc->ure_txc_tid = 0;
+	mutex_exit(&sc->ure_txc_lock);
+
+	if (tid != 0) {
+		(void) untimeout(tid);
+	}
+
+	if (chain != NULL) {
+		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
+		kmem_cache_free(sc->ure_tx_cache, chain);
+		mutex_enter(&sc->ure_tx_lock);
+		sc->ure_tx_cnt--;
+		mutex_exit(&sc->ure_tx_lock);
+	}
+}
+
+/*
+ * Coalescing timer callback -- flush whatever has accumulated.
+ */
+static void
+ure_txc_timeout(void *arg)
+{
+	ure_softc_t *sc = (ure_softc_t *)arg;
+	ure_tx_chain_t *chain;
+
+	mutex_enter(&sc->ure_txc_lock);
+	sc->ure_txc_tid = 0;
+
+	chain = sc->ure_txc_chain;
+	if (chain == NULL || chain->uc_npkts == 0) {
+		mutex_exit(&sc->ure_txc_lock);
+		return;
+	}
+
+	/* Finalize and detach */
+	chain->uc_buf->b_wptr = chain->uc_buf->b_rptr + sc->ure_txc_pos;
+	sc->ure_txc_chain = NULL;
+	sc->ure_txc_pos = 0;
+
+	mutex_exit(&sc->ure_txc_lock);
+
+	ure_txc_submit(sc, chain);
+}
+
+/*
+ * mc_tx callback -- transmit a chain of mblk_t packets.
+ *
+ * Packs frames into a coalescing buffer.  The buffer is flushed to
+ * USB when full or when the coalescing timer fires, whichever comes
+ * first.  Packet data is copied immediately and the original mblks
+ * freed, so no mblk lifetime spans the coalescing window.
  */
 static mblk_t *
 ure_m_tx(void *arg, mblk_t *mp)
@@ -2112,7 +2268,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 	ure_softc_t *sc = (ure_softc_t *)arg;
 	uint32_t hdrsize, pkt_align;
 
-	/* 1. State check under ure_lock (brief, no USB I/O) */
+	/* 1. State check */
 	mutex_enter(&sc->ure_lock);
 	if (sc->ure_gone || !sc->ure_running ||
 	    !(sc->ure_flags & URE_FLAG_LINK)) {
@@ -2127,199 +2283,156 @@ ure_m_tx(void *arg, mblk_t *mp)
 	pkt_align = (sc->ure_flags & URE_FLAG_8157) ?
 	    URE_8157_BUF_ALIGN : URE_TX_BUF_ALIGN;
 
-	/* 2. Loop: fill as many TX slots as available */
+	mutex_enter(&sc->ure_txc_lock);
+
+	/* 2. Pack frames into the coalescing buffer */
 	while (mp != NULL) {
-		ure_tx_chain_t *chain;
-		usb_bulk_req_t *req;
+		uint32_t mlen, aligned_pos;
 		unsigned char *buf;
-		uint32_t pos = 0;
-		mblk_t *packed_head;
-		int rval;
 
-		/* 2a. Admission check under ure_tx_lock */
-		mutex_enter(&sc->ure_tx_lock);
-		if (sc->ure_tx_cnt >= URE_TX_MAX) {
-			mutex_exit(&sc->ure_tx_lock);
-			break;		/* backpressure */
-		}
-		sc->ure_tx_cnt++;
-		mutex_exit(&sc->ure_tx_lock);
-
-		/* 2b. Get a chain from the slab (no lock held) */
-		chain = kmem_cache_alloc(sc->ure_tx_cache, KM_NOSLEEP);
-		if (chain == NULL) {
+		/* 2a. Ensure we have a coalescing buffer */
+		if (sc->ure_txc_chain == NULL) {
 			mutex_enter(&sc->ure_tx_lock);
-			sc->ure_tx_cnt--;
+			if (sc->ure_tx_cnt >= URE_TX_MAX) {
+				mutex_exit(&sc->ure_tx_lock);
+				break;		/* backpressure */
+			}
+			sc->ure_tx_cnt++;
 			mutex_exit(&sc->ure_tx_lock);
-			break;		/* backpressure */
+
+			sc->ure_txc_chain = kmem_cache_alloc(
+			    sc->ure_tx_cache, KM_NOSLEEP);
+			if (sc->ure_txc_chain == NULL) {
+				mutex_enter(&sc->ure_tx_lock);
+				sc->ure_tx_cnt--;
+				mutex_exit(&sc->ure_tx_lock);
+				break;		/* backpressure */
+			}
+			sc->ure_txc_chain->uc_npkts = 0;
+			sc->ure_txc_chain->uc_nbytes = 0;
+			sc->ure_txc_pos = 0;
 		}
 
-		/* 2c. Pack aggregated frames (no lock held) */
-		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
-		chain->uc_npkts = 0;
-		chain->uc_nbytes = 0;
-		packed_head = mp;
-		buf = chain->uc_buf->b_rptr;
+		/* 2b. Check fit */
+		mlen = msgsize(mp);
+		aligned_pos = P2ROUNDUP(sc->ure_txc_pos, pkt_align);
 
-		while (mp != NULL) {
-			uint32_t mlen = msgsize(mp);
-			uint32_t aligned_pos = P2ROUNDUP(pos, pkt_align);
-
-			/* Does this packet fit? */
-			if (aligned_pos + hdrsize + mlen >
-			    chain->uc_bufmax)
+		if (aligned_pos + hdrsize + mlen >
+		    sc->ure_txc_chain->uc_bufmax) {
+			if (sc->ure_txc_chain->uc_npkts == 0) {
+				/* Oversized frame -- cannot fit at all */
 				break;
-
-			pos = aligned_pos;
-
-			/* Write TX header */
-			if (sc->ure_flags & URE_FLAG_8157) {
-				ure_txpkt_v2_t txhdr;
-				bzero(&txhdr, sizeof (txhdr));
-				txhdr.ure_cmdstat = LE_32(
-				    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
-				txhdr.ure_pktlen = LE_32(mlen << 4);
-				txhdr.ure_signature = LE_32(
-				    URE_TXPKT_SIGNATURE);
-				bcopy(&txhdr, buf + pos, sizeof (txhdr));
-			} else {
-				ure_txpkt_t txhdr;
-				uint32_t txcsum = 0;
-
-				bzero(&txhdr, sizeof (txhdr));
-				txhdr.ure_pktlen = LE_32(mlen |
-				    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
-
-				/*
-				 * TX checksum offload (v1 only).
-				 * Parse the Ethernet and IP headers to
-				 * determine L4 offset and protocol for
-				 * the hardware to compute the checksum.
-				 * IPv6 is not offloaded (advertised V4
-				 * only), so the stack computes it.
-				 */
-				uint32_t hck_flags;
-				mac_hcksum_get(mp, NULL, NULL, NULL, NULL,
-				    &hck_flags);
-				if (hck_flags & HCK_IPV4_HDRCKSUM)
-					txcsum |= URE_TXPKT_IPV4;
-				if (hck_flags & HCK_FULLCKSUM) {
-					struct ether_header *eh =
-					    (struct ether_header *)mp->b_rptr;
-					uint16_t etype = ntohs(eh->ether_type);
-					uint32_t l3off =
-					    sizeof (struct ether_header);
-
-					if (etype == ETHERTYPE_VLAN) {
-						etype = ntohs(*(uint16_t *)
-						    (mp->b_rptr + l3off + 2));
-						l3off += VLAN_TAGSZ;
-					}
-					if (etype == ETHERTYPE_IP) {
-						ipha_t *ipha = (ipha_t *)
-						    (mp->b_rptr + l3off);
-						uint32_t l4off = l3off +
-						    IPH_HDR_LENGTH(ipha);
-
-						txcsum |= URE_TXPKT_IPV4;
-						if (ipha->ipha_protocol ==
-						    IPPROTO_TCP)
-							txcsum |=
-							    URE_TXPKT_TCP;
-						else if (ipha->ipha_protocol ==
-						    IPPROTO_UDP)
-							txcsum |=
-							    URE_TXPKT_UDP;
-						txcsum |=
-						    (l4off &
-						    URE_TXPKT_L4_OFFSET_MAX) <<
-						    URE_TXPKT_L4_OFFSET_SHIFT;
-					}
-				}
-				txhdr.ure_vlan = LE_32(txcsum);
-
-				bcopy(&txhdr, buf + pos, sizeof (txhdr));
 			}
-			pos += hdrsize;
+			/* Buffer full -- flush and retry */
+			ure_txc_flush_locked(sc);
+			continue;
+		}
 
-			/* Copy packet data (handle b_cont chains) */
+		sc->ure_txc_pos = aligned_pos;
+		buf = sc->ure_txc_chain->uc_buf->b_rptr;
+
+		/* 2c. Write TX header */
+		if (sc->ure_flags & URE_FLAG_8157) {
+			ure_txpkt_v2_t txhdr;
+			bzero(&txhdr, sizeof (txhdr));
+			txhdr.ure_cmdstat = LE_32(
+			    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
+			txhdr.ure_pktlen = LE_32(mlen << 4);
+			txhdr.ure_signature = LE_32(
+			    URE_TXPKT_SIGNATURE);
+			bcopy(&txhdr, buf + sc->ure_txc_pos,
+			    sizeof (txhdr));
+		} else {
+			ure_txpkt_t txhdr;
+			uint32_t txcsum = 0;
+
+			bzero(&txhdr, sizeof (txhdr));
+			txhdr.ure_pktlen = LE_32(mlen |
+			    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
+
+			/*
+			 * TX checksum offload (v1 only).
+			 */
+			uint32_t hck_flags;
+			mac_hcksum_get(mp, NULL, NULL, NULL, NULL,
+			    &hck_flags);
+			if (hck_flags & HCK_IPV4_HDRCKSUM) {
+				txcsum |= URE_TXPKT_IPV4;
+			}
+			if (hck_flags & HCK_FULLCKSUM) {
+				struct ether_header *eh =
+				    (struct ether_header *)mp->b_rptr;
+				uint16_t etype = ntohs(eh->ether_type);
+				uint32_t l3off =
+				    sizeof (struct ether_header);
+
+				if (etype == ETHERTYPE_VLAN) {
+					etype = ntohs(*(uint16_t *)
+					    (mp->b_rptr + l3off + 2));
+					l3off += VLAN_TAGSZ;
+				}
+				if (etype == ETHERTYPE_IP) {
+					ipha_t *ipha = (ipha_t *)
+					    (mp->b_rptr + l3off);
+					uint32_t l4off = l3off +
+					    IPH_HDR_LENGTH(ipha);
+
+					txcsum |= URE_TXPKT_IPV4;
+					if (ipha->ipha_protocol ==
+					    IPPROTO_TCP) {
+						txcsum |=
+						    URE_TXPKT_TCP;
+					} else if (ipha->ipha_protocol ==
+					    IPPROTO_UDP) {
+						txcsum |=
+						    URE_TXPKT_UDP;
+					}
+					txcsum |=
+					    (l4off &
+					    URE_TXPKT_L4_OFFSET_MAX) <<
+					    URE_TXPKT_L4_OFFSET_SHIFT;
+				}
+			}
+			txhdr.ure_vlan = LE_32(txcsum);
+
+			bcopy(&txhdr, buf + sc->ure_txc_pos,
+			    sizeof (txhdr));
+		}
+		sc->ure_txc_pos += hdrsize;
+
+		/* 2d. Copy packet data */
+		{
 			mblk_t *m;
 			for (m = mp; m != NULL; m = m->b_cont) {
 				uint32_t len = MBLKL(m);
 				if (len > 0) {
-					bcopy(m->b_rptr, buf + pos, len);
-					pos += len;
+					bcopy(m->b_rptr,
+					    buf + sc->ure_txc_pos, len);
+					sc->ure_txc_pos += len;
 				}
 			}
-
-			chain->uc_npkts++;
-			chain->uc_nbytes += mlen;
-			mp = mp->b_next;
-		}
-		/* mp now points to first un-packed packet (or NULL) */
-
-		if (chain->uc_npkts == 0) {
-			/* Nothing fit (single oversized frame?) */
-			kmem_cache_free(sc->ure_tx_cache, chain);
-			mutex_enter(&sc->ure_tx_lock);
-			sc->ure_tx_cnt--;
-			mutex_exit(&sc->ure_tx_lock);
-			break;
 		}
 
-		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr + pos;
+		sc->ure_txc_chain->uc_npkts++;
+		sc->ure_txc_chain->uc_nbytes += mlen;
 
-		/* 2d. Allocate the USBA bulk req (no lock held) */
-		req = usb_alloc_bulk_req(sc->ure_dip, 0,
-		    USB_FLAGS_NOSLEEP);
-		if (req == NULL) {
-			kmem_cache_free(sc->ure_tx_cache, chain);
-			mutex_enter(&sc->ure_tx_lock);
-			sc->ure_tx_cnt--;
-			mutex_exit(&sc->ure_tx_lock);
-			mp = packed_head;	/* return all */
-			break;
-		}
-
-		req->bulk_data = chain->uc_buf;
-		req->bulk_len = MBLKL(chain->uc_buf);
-		req->bulk_timeout = 5;
-		req->bulk_cb = ure_tx_cb;
-		req->bulk_exc_cb = ure_tx_cb;
-		req->bulk_client_private = (usb_opaque_t)chain;
-		req->bulk_attributes = USB_ATTRS_AUTOCLEARING;
-
-		/* 2e. Serialize the USB submit */
-		(void) usb_serialize_access(sc->ure_tx_ser,
-		    USB_WAIT, 0);
-		rval = usb_pipe_bulk_xfer(sc->ure_bulkout_pipe,
-		    req, USB_FLAGS_NOSLEEP);
-		usb_release_access(sc->ure_tx_ser);
-
-		if (rval != USB_SUCCESS) {
-			req->bulk_data = NULL;	/* detach our mblk */
-			usb_free_bulk_req(req);
-			kmem_cache_free(sc->ure_tx_cache, chain);
-			mutex_enter(&sc->ure_tx_lock);
-			sc->ure_tx_cnt--;
-			mutex_exit(&sc->ure_tx_lock);
-			mp = packed_head;	/* give everything back */
-			break;
-		}
-
-		/* 2f. Submit succeeded — free the packed mblks */
+		/* 2e. Free this mblk and advance */
 		{
-			mblk_t *m = packed_head;
-			while (m != mp) {
-				mblk_t *next = m->b_next;
-				m->b_next = NULL;
-				freemsg(m);
-				m = next;
-			}
+			mblk_t *next = mp->b_next;
+			mp->b_next = NULL;
+			freemsg(mp);
+			mp = next;
 		}
-
-		/* Loop back to 2a for remaining mp */
 	}
+
+	/* 3. Arm the coalescing timer if data is pending */
+	if (sc->ure_txc_chain != NULL && sc->ure_txc_chain->uc_npkts > 0 &&
+	    sc->ure_txc_tid == 0) {
+		sc->ure_txc_tid = timeout(ure_txc_timeout, sc,
+		    drv_usectohz(URE_TX_COAL_USEC));
+	}
+
+	mutex_exit(&sc->ure_txc_lock);
 
 	return (mp);
 }
@@ -2419,6 +2532,9 @@ ure_m_stop(void *arg)
 	mutex_enter(&sc->ure_lock);
 	sc->ure_running = B_FALSE;
 	mutex_exit(&sc->ure_lock);
+
+	/* Discard any pending coalescing buffer */
+	ure_txc_discard(sc);
 
 	/* Reset the chip to stop RX/TX */
 	ure_reset(sc);
@@ -2789,6 +2905,9 @@ ure_disconnect_cb(dev_info_t *dip)
 	sc->ure_link_state = LINK_STATE_DOWN;
 	mutex_exit(&sc->ure_lock);
 
+	/* Discard any pending coalescing buffer */
+	ure_txc_discard(sc);
+
 	mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
 
 	return (DDI_SUCCESS);
@@ -3041,6 +3160,7 @@ ure_cleanup(ure_softc_t *sc)
 	}
 
 	if (sc->ure_attach_seq & URE_ATTACH_MUTEX) {
+		mutex_destroy(&sc->ure_txc_lock);
 		mutex_destroy(&sc->ure_tx_lock);
 		mutex_destroy(&sc->ure_lock);
 		sc->ure_attach_seq &= ~URE_ATTACH_MUTEX;
@@ -3198,6 +3318,8 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	    sc->ure_dev_data->dev_iblock_cookie);
 	mutex_init(&sc->ure_tx_lock, NULL, MUTEX_DRIVER,
 	    sc->ure_dev_data->dev_iblock_cookie);
+	mutex_init(&sc->ure_txc_lock, NULL, MUTEX_DRIVER,
+	    sc->ure_dev_data->dev_iblock_cookie);
 	sc->ure_attach_seq |= URE_ATTACH_MUTEX;
 
 	/* Step 5: Identify and initialise chip */
@@ -3317,6 +3439,9 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		sc->ure_gone = B_TRUE;
 		sc->ure_link_state = LINK_STATE_UNKNOWN;
 		mutex_exit(&sc->ure_lock);
+
+		/* Discard any pending coalescing buffer */
+		ure_txc_discard(sc);
 
 		/*
 		 * Reset the chip to quiesce DMA, then drain any

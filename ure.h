@@ -226,6 +226,12 @@ typedef struct ure_softc {
 	uint_t			ure_tx_cnt;	/* xfers in flight (tx_lock) */
 	hrtime_t		ure_tx_watchdog; /* stuck TX detection (tx_lock) */
 
+	/* TX coalescing */
+	kmutex_t		ure_txc_lock;	/* coalescing buffer lock */
+	ure_tx_chain_t		*ure_txc_chain;	/* buffer being filled */
+	uint32_t		ure_txc_pos;	/* fill position in buffer */
+	timeout_id_t		ure_txc_tid;	/* pending flush timeout */
+
 	/* Device online/offline */
 	boolean_t		ure_running;	/* mc_start called */
 	boolean_t		ure_gone;	/* USB disconnect */
