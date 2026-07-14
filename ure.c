@@ -2479,7 +2479,7 @@ ure_mcast_hash_bit(const uint8_t *addr)
 			c >>= 1;
 		}
 	}
-	return ((~crc >> 26) & 0x3f);
+	return ((crc >> 26) & 0x3f);
 }
 
 /*
