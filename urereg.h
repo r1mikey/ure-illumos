@@ -708,7 +708,7 @@ typedef struct ure_txpkt_v2 {
 #define	URE_RX_BUF_ALIGN	8
 #define	URE_8157_BUF_ALIGN	16
 
-#define	URE_TX_BUFSZ		16384
+#define	URE_TX_BUFSZ		32768
 #define	URE_8156_TX_BUFSZ	32768
 #define	URE_8152_RX_BUFSZ	16384
 #define	URE_8153_RX_BUFSZ	32768
