@@ -130,11 +130,9 @@ extern "C" {
 #define	URE_ENDPT_MAX		2
 
 /*
- * Maximum concurrent TX transfers.  USBA serialises bulk pipe
- * submissions (one active transfer, remainder queued), so there
- * is no benefit to large counts.  Match Linux RTL8152_MAX_TX.
+ * Maximum concurrent TX transfers.
  */
-#define	URE_TX_MAX		4
+#define	URE_TX_MAX		32
 
 /*
  * Multicast address tracking entry.
