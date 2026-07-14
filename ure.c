@@ -2469,13 +2469,19 @@ ure_mcast_hash_bit(const uint8_t *addr)
 	uint32_t crc = 0xffffffff;
 	int i, j;
 
+	/*
+	 * Compute the Ethernet multicast hash using the standard CRC-32
+	 * polynomial (0x04c11db7) with each byte processed LSB-first to
+	 * match the Ethernet wire bit ordering.  This is equivalent to
+	 * Linux's ether_crc() (= bitrev32(crc32_le())).
+	 */
 	for (i = 0; i < ETHERADDRL; i++) {
 		uint8_t c = addr[i];
 		for (j = 0; j < 8; j++) {
-			if ((crc ^ c) & 1)
-				crc = (crc >> 1) ^ 0xedb88320;
+			if (((crc >> 31) ^ (c & 1)) != 0)
+				crc = (crc << 1) ^ 0x04c11db7;
 			else
-				crc >>= 1;
+				crc <<= 1;
 			c >>= 1;
 		}
 	}
