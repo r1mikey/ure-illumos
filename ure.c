@@ -1788,6 +1788,13 @@ ure_set_rx_filter(ure_softc_t *sc)
 		hashes[1] = sc->ure_mcast_hash[1];
 	}
 
+	/* Swap hash words (hardware expects swapped order) */
+	{
+		uint32_t tmp = hashes[0];
+		hashes[0] = BSWAP_32(hashes[1]);
+		hashes[1] = BSWAP_32(tmp);
+	}
+
 	ure_write_mem(sc, URE_PLA_MAR,
 	    URE_MCU_TYPE_PLA | URE_BYTE_EN_DWORD,
 	    hashes, sizeof (hashes));
