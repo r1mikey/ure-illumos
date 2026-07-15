@@ -2050,11 +2050,12 @@ restart:
  */
 
 /*
- * TX completion callback — called by USBA when a bulk OUT transfer
+ * TX completion callback - called by USBA when a bulk OUT transfer
  * completes (success or failure).  Updates statistics, detaches the
  * pre-allocated aggregation mblk (so usb_free_bulk_req doesn't free
- * it), returns the chain to the slab cache, and wakes the MAC
- * framework if the TX pipeline was at capacity.
+ * it), returns the chain to the slab cache, wakes the MAC framework
+ * if the TX pipeline was at capacity, and kicks any pending
+ * coalescing data so the pipe stays busy.
  */
 static void
 ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
@@ -2064,7 +2065,7 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	ure_softc_t *sc = chain->uc_sc;
 	boolean_t was_full, do_update;
 
-	/* Stats on completion — correct semantics */
+	/* Stats on completion - correct semantics */
 	if (req->bulk_completion_reason == USB_CR_OK) {
 		atomic_add_64(&sc->ure_stat_opackets, chain->uc_npkts);
 		atomic_add_64(&sc->ure_stat_obytes, chain->uc_nbytes);
@@ -2093,6 +2094,20 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 		if (do_update)
 			mac_tx_update(sc->ure_mh);
 	}
+
+	/*
+	 * Kick the coalescing buffer: if there is pending data,
+	 * flush it now so USBA can start the next transfer
+	 * immediately.  Without this, the pipe sits idle until
+	 * either ure_m_tx fills the buffer or the coalescing
+	 * timer fires.
+	 */
+	mutex_enter(&sc->ure_txc_lock);
+	if (sc->ure_txc_chain != NULL &&
+	    sc->ure_txc_chain->uc_npkts > 0) {
+		ure_txc_flush_locked(sc);
+	}
+	mutex_exit(&sc->ure_txc_lock);
 }
 
 /*
