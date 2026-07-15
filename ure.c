@@ -2112,52 +2112,68 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	_NOTE(ARGUNUSED(ph));
 	ure_tx_chain_t *chain = (ure_tx_chain_t *)req->bulk_client_private;
 	ure_softc_t *sc = chain->uc_sc;
-	boolean_t was_full, do_update, pipe_idle;
+	boolean_t was_full, do_update, pipe_draining, ok;
+	uint64_t npkts, nbytes;
 
-	/* Stats on completion - correct semantics */
-	if (req->bulk_completion_reason == USB_CR_OK) {
-		atomic_add_64(&sc->ure_stat_opackets, chain->uc_npkts);
-		atomic_add_64(&sc->ure_stat_obytes, chain->uc_nbytes);
-	} else {
-		atomic_add_64(&sc->ure_stat_oerrors, chain->uc_npkts);
-	}
+	/* Snapshot stats before we touch anything */
+	ok = (req->bulk_completion_reason == USB_CR_OK);
+	npkts = chain->uc_npkts;
+	nbytes = chain->uc_nbytes;
 
-	/* Detach our mblk before USBA frees it */
+	/* Detach our mblk before USBA frees req */
 	req->bulk_data = NULL;
 	usb_free_bulk_req(req);
 
-	/* Reset mblk for reuse, return chain to slab */
-	chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
-	kmem_cache_free(sc->ure_tx_cache, chain);
-
-	/* Wake MAC if was at capacity */
+	/*
+	 * Decrement tx_cnt immediately so we know the pipe state.
+	 * The pipe is IDLE in USBA right now (set before our callback),
+	 * so any usb_pipe_bulk_xfer() we issue goes straight to the HCD.
+	 */
 	mutex_enter(&sc->ure_tx_lock);
 	was_full = (sc->ure_tx_cnt >= URE_TX_MAX);
 	sc->ure_tx_cnt--;
-	pipe_idle = (sc->ure_tx_cnt == 0);
+	pipe_draining = (sc->ure_tx_cnt <= 1);
 	mutex_exit(&sc->ure_tx_lock);
 
-	if (was_full) {
-		mutex_enter(&sc->ure_lock);
-		do_update = sc->ure_running && !sc->ure_gone;
-		mutex_exit(&sc->ure_lock);
-		if (do_update)
-			mac_tx_update(sc->ure_mh);
-	}
-
 	/*
-	 * Kick the coalescing buffer only if the pipe would
-	 * otherwise go idle (no other transfers queued in USBA).
-	 * If there are other transfers in flight, let the buffer
-	 * continue filling for a larger submission.
+	 * If the pipe is idle or down to one queued transfer, flush the
+	 * coalescing buffer NOW -- before any other bookkeeping -- to
+	 * minimise the window where no TD is on the xHCI ring.
+	 *
+	 * When tx_cnt == 0 the pipe is already idle and our
+	 * usb_pipe_bulk_xfer() goes straight to the HCD.  When
+	 * tx_cnt == 1 there is one transfer left in the USBA queue;
+	 * flushing pre-stages the next transfer so that
+	 * usba_start_next_req() always has work ready and the pipe
+	 * never goes dry.
 	 */
-	if (pipe_idle) {
+	if (pipe_draining) {
 		mutex_enter(&sc->ure_txc_lock);
 		if (sc->ure_txc_chain != NULL &&
 		    sc->ure_txc_chain->uc_npkts > 0) {
 			ure_txc_flush_locked(sc);
 		}
 		mutex_exit(&sc->ure_txc_lock);
+	}
+
+	/* Stats and cleanup -- off the critical path now */
+	if (ok) {
+		atomic_add_64(&sc->ure_stat_opackets, npkts);
+		atomic_add_64(&sc->ure_stat_obytes, nbytes);
+	} else {
+		atomic_add_64(&sc->ure_stat_oerrors, npkts);
+	}
+
+	chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
+	kmem_cache_free(sc->ure_tx_cache, chain);
+
+	if (was_full) {
+		mutex_enter(&sc->ure_lock);
+		do_update = sc->ure_running && !sc->ure_gone;
+		mutex_exit(&sc->ure_lock);
+		if (do_update) {
+			mac_tx_update(sc->ure_mh);
+		}
 	}
 }
 
