@@ -1757,6 +1757,7 @@ ure_link_check(void *arg)
 			usb_pipe_reset(sc->ure_dip,
 			    sc->ure_bulkout_pipe,
 			    USB_FLAGS_SLEEP, NULL, 0);
+			ure_txc_discard(sc);
 			return;
 		}
 	} else {
