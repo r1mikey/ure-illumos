@@ -2063,7 +2063,7 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	_NOTE(ARGUNUSED(ph));
 	ure_tx_chain_t *chain = (ure_tx_chain_t *)req->bulk_client_private;
 	ure_softc_t *sc = chain->uc_sc;
-	boolean_t was_full, do_update;
+	boolean_t was_full, do_update, pipe_idle;
 
 	/* Stats on completion - correct semantics */
 	if (req->bulk_completion_reason == USB_CR_OK) {
@@ -2085,6 +2085,7 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	mutex_enter(&sc->ure_tx_lock);
 	was_full = (sc->ure_tx_cnt >= URE_TX_MAX);
 	sc->ure_tx_cnt--;
+	pipe_idle = (sc->ure_tx_cnt == 0);
 	mutex_exit(&sc->ure_tx_lock);
 
 	if (was_full) {
@@ -2101,13 +2102,14 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	 * If there are other transfers in flight, let the buffer
 	 * continue filling for a larger submission.
 	 */
-	mutex_enter(&sc->ure_txc_lock);
-	if (sc->ure_tx_cnt == 0 &&
-	    sc->ure_txc_chain != NULL &&
-	    sc->ure_txc_chain->uc_npkts > 0) {
-		ure_txc_flush_locked(sc);
+	if (pipe_idle) {
+		mutex_enter(&sc->ure_txc_lock);
+		if (sc->ure_txc_chain != NULL &&
+		    sc->ure_txc_chain->uc_npkts > 0) {
+			ure_txc_flush_locked(sc);
+		}
+		mutex_exit(&sc->ure_txc_lock);
 	}
-	mutex_exit(&sc->ure_txc_lock);
 }
 
 /*
