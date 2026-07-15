@@ -3003,7 +3003,7 @@ ure_chip_init(ure_softc_t *sc)
 	switch (ver) {
 	case 0x1030:
 		sc->ure_flags = URE_FLAG_8157;
-		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
+		sc->ure_txbufsz = URE_TX_BUFSZ;
 		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
 		sc->ure_phy_read = ure_rtl8157_ocp_reg_read;
 		sc->ure_phy_write = ure_rtl8157_ocp_reg_write;
@@ -3072,21 +3072,21 @@ ure_chip_init(ure_softc_t *sc)
 	case 0x7020:
 		sc->ure_flags = URE_FLAG_8156;
 		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
-		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
+		sc->ure_rxbufsz = URE_8156_RX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8156 (0x%04x)\n", ver);
 		break;
 	case 0x7030:
 		sc->ure_flags = URE_FLAG_8156;
 		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
-		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
+		sc->ure_rxbufsz = URE_8156_RX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8156 (0x%04x)\n", ver);
 		break;
 	case 0x7410:
 		sc->ure_flags = URE_FLAG_8156B;
 		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
-		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
+		sc->ure_rxbufsz = URE_8156_RX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8156B (0x%04x)\n", ver);
 		break;
@@ -3094,7 +3094,7 @@ ure_chip_init(ure_softc_t *sc)
 		sc->ure_flags = URE_FLAG_8156B;
 		sc->ure_chip |= URE_CHIP_VER_7420;
 		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
-		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
+		sc->ure_rxbufsz = URE_8156_RX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8153D (0x%04x)\n", ver);
 		break;

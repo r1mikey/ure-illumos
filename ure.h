@@ -132,7 +132,7 @@ extern "C" {
 /*
  * Maximum concurrent TX transfers.
  */
-#define	URE_TX_MAX		32
+#define	URE_TX_MAX		4
 
 /*
  * Multicast address tracking entry.

@@ -708,11 +708,12 @@ typedef struct ure_txpkt_v2 {
 #define	URE_RX_BUF_ALIGN	8
 #define	URE_8157_BUF_ALIGN	16
 
-#define	URE_TX_BUFSZ		65536
+#define	URE_TX_BUFSZ		16384
 #define	URE_TX_COAL_USEC	1000	/* TX coalescing timer (usec) */
 #define	URE_8156_TX_BUFSZ	32768
 #define	URE_8152_RX_BUFSZ	16384
 #define	URE_8153_RX_BUFSZ	32768
+#define	URE_8156_RX_BUFSZ	49152
 
 #ifdef __cplusplus
 }
