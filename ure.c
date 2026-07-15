@@ -2096,14 +2096,14 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	}
 
 	/*
-	 * Kick the coalescing buffer: if there is pending data,
-	 * flush it now so USBA can start the next transfer
-	 * immediately.  Without this, the pipe sits idle until
-	 * either ure_m_tx fills the buffer or the coalescing
-	 * timer fires.
+	 * Kick the coalescing buffer only if the pipe would
+	 * otherwise go idle (no other transfers queued in USBA).
+	 * If there are other transfers in flight, let the buffer
+	 * continue filling for a larger submission.
 	 */
 	mutex_enter(&sc->ure_txc_lock);
-	if (sc->ure_txc_chain != NULL &&
+	if (sc->ure_tx_cnt == 0 &&
+	    sc->ure_txc_chain != NULL &&
 	    sc->ure_txc_chain->uc_npkts > 0) {
 		ure_txc_flush_locked(sc);
 	}
