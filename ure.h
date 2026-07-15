@@ -121,6 +121,7 @@ extern "C" {
 #define	URE_ATTACH_LINK_TIMER	0x0080	/* link poll timer running */
 #define	URE_ATTACH_TX_SER	0x0100	/* TX serializer initialised */
 #define	URE_ATTACH_TX_CACHE	0x0200	/* TX chain kmem_cache created */
+#define	URE_ATTACH_RX_TASKQ	0x0400	/* RX processing taskq created */
 
 /*
  * Endpoint indices.
@@ -167,6 +168,10 @@ typedef struct ure_tx_chain {
  *                 bulk USB I/O.
  *   ure_tx_lock — protects ure_tx_cnt (TX in-flight counter) only.
  *                 Brief hold; never held simultaneously with ure_lock.
+ *
+ * RX processing runs on the single-threaded ure_rxq DDI taskq to
+ * decouple packet parsing and mac_rx() from the USBA callback thread,
+ * allowing immediate USB transfer resubmission.
  */
 typedef struct ure_softc {
 	dev_info_t		*ure_dip;
@@ -219,6 +224,7 @@ typedef struct ure_softc {
 
 	/* RX state */
 	uint_t			ure_rx_cnt;	/* bulk-IN xfers in flight */
+	ddi_taskq_t		*ure_rxq;	/* RX processing taskq */
 
 	/* TX state */
 	kmem_cache_t		*ure_tx_cache;	/* slab cache for tx chains */

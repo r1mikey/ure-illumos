@@ -163,6 +163,7 @@ static boolean_t	ure_m_getcapab(void *, mac_capab_t, void *);
 
 static void	ure_rx_start(ure_softc_t *);
 static void	ure_rx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
+static void	ure_rx_process(void *);
 static void	ure_tx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
 static void	ure_txc_submit(ure_softc_t *, ure_tx_chain_t *);
 static void	ure_txc_flush_locked(ure_softc_t *);
@@ -1852,8 +1853,14 @@ ure_rx_start(ure_softc_t *sc)
 
 /*
  * RX callback — called when a bulk IN transfer completes.
- * The buffer may contain multiple aggregated packets, each
- * preceded by a ure_rxpkt (or ure_rxpkt_v2 for RTL8157) header.
+ *
+ * This callback does the minimum work needed to keep the USB pipe
+ * fed: detach the received data buffer, dispatch it to the RX taskq
+ * for packet processing, and immediately resubmit the next transfer.
+ * Moving packet parsing and mac_rx() off the USBA callback thread
+ * eliminates the gap where the adapter has no outstanding transfer
+ * and must hold incoming data in its FIFO, which improves RX
+ * aggregation and throughput.
  */
 static void
 ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
@@ -1861,16 +1868,10 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	_NOTE(ARGUNUSED(ph));
 	ure_softc_t *sc = (ure_softc_t *)req->bulk_client_private;
 	mblk_t *data = req->bulk_data;
-	mblk_t *head = NULL, *tail = NULL;
-	uint32_t total_len;
-	uint32_t hdrsize, align;
-	boolean_t running;
-	int pktlen;
 
 	/* Snapshot state under lock to avoid bare-read races */
 	mutex_enter(&sc->ure_lock);
-	running = sc->ure_running && !sc->ure_gone;
-	if (!running) {
+	if (!sc->ure_running || sc->ure_gone) {
 		ASSERT(sc->ure_rx_cnt > 0);
 		sc->ure_rx_cnt--;
 		mutex_exit(&sc->ure_lock);
@@ -1882,11 +1883,70 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	if (req->bulk_completion_reason != USB_CR_OK) {
 		if (req->bulk_completion_reason != USB_CR_STOPPED_POLLING)
 			atomic_add_64(&sc->ure_stat_ierrors, 1);
-		goto restart;
+		goto resubmit;
 	}
 
-	if (data == NULL)
-		goto restart;
+	if (data == NULL) {
+		goto resubmit;
+	}
+
+	/*
+	 * Detach the data buffer and dispatch packet processing to
+	 * the RX taskq.  The softstate pointer is stashed in b_prev
+	 * to avoid a per-transfer heap allocation — ddi_taskq_dispatch
+	 * takes a single void* argument and we need both the softstate
+	 * and the data buffer.  b_prev is unused at this point in the
+	 * mblk lifecycle (the buffer has been detached from the USB
+	 * request and is not yet on any mblk chain).
+	 */
+	req->bulk_data = NULL;
+	data->b_prev = (mblk_t *)(uintptr_t)sc;
+
+	if (ddi_taskq_dispatch(sc->ure_rxq, ure_rx_process, data,
+	    DDI_NOSLEEP) != DDI_SUCCESS) {
+		atomic_add_64(&sc->ure_stat_ierrors, 1);
+		freemsg(data);
+	}
+	data = NULL;	/* worker or error path owns it now */
+
+resubmit:
+	req->bulk_data = NULL;
+	usb_free_bulk_req(req);
+	if (data != NULL)
+		freemsg(data);
+
+	mutex_enter(&sc->ure_lock);
+	ASSERT(sc->ure_rx_cnt > 0);
+	sc->ure_rx_cnt--;
+	if (sc->ure_running && !sc->ure_gone)
+		ure_rx_start(sc);
+	mutex_exit(&sc->ure_lock);
+}
+
+/*
+ * RX packet processing — runs on the ure_rxq taskq thread.
+ *
+ * Each USB transfer buffer may contain multiple aggregated packets,
+ * each preceded by a ure_rxpkt (or ure_rxpkt_v2 for RTL8157) header.
+ * This function parses them out, copies each into its own mblk, and
+ * passes the chain to mac_rx().
+ */
+static void
+ure_rx_process(void *arg)
+{
+	mblk_t *data = (mblk_t *)arg;
+
+	/*
+	 * Recover the softstate pointer stashed by ure_rx_cb.
+	 * See the comment there for why b_prev is used.
+	 */
+	ure_softc_t *sc = (ure_softc_t *)(uintptr_t)data->b_prev;
+	data->b_prev = NULL;
+
+	mblk_t *head = NULL, *tail = NULL;
+	uint32_t total_len;
+	uint32_t hdrsize, align;
+	int pktlen;
 
 	total_len = MBLKL(data);
 
@@ -2025,25 +2085,13 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 
 	/* Pass received chain to MAC */
 	if (head != NULL) {
-		if (running)
+		if (sc->ure_running && !sc->ure_gone)
 			mac_rx(sc->ure_mh, NULL, head);
 		else
 			freemsgchain(head);
 	}
 
-restart:
-	/* Resubmit RX */
-	req->bulk_data = NULL;
-	usb_free_bulk_req(req);
-	if (data != NULL)
-		freemsg(data);
-
-	mutex_enter(&sc->ure_lock);
-	ASSERT(sc->ure_rx_cnt > 0);
-	sc->ure_rx_cnt--;
-	if (sc->ure_running && !sc->ure_gone)
-		ure_rx_start(sc);
-	mutex_exit(&sc->ure_lock);
+	freemsg(data);
 }
 
 /*
@@ -3163,6 +3211,17 @@ ure_cleanup(ure_softc_t *sc)
 		sc->ure_attach_seq &= ~URE_ATTACH_TX_CACHE;
 	}
 
+	/*
+	 * Drain and destroy the RX taskq.  Pipes are already closed
+	 * so no new callbacks will dispatch; ddi_taskq_destroy waits
+	 * for any in-flight task to complete before returning.
+	 */
+	if (sc->ure_attach_seq & URE_ATTACH_RX_TASKQ) {
+		ddi_taskq_destroy(sc->ure_rxq);
+		sc->ure_rxq = NULL;
+		sc->ure_attach_seq &= ~URE_ATTACH_RX_TASKQ;
+	}
+
 	if (sc->ure_attach_seq & URE_ATTACH_TX_SER) {
 		usb_fini_serialization(sc->ure_tx_ser);
 		sc->ure_tx_ser = NULL;
@@ -3361,6 +3420,16 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		    NULL, (void *)sc, NULL, 0);
 	}
 	sc->ure_attach_seq |= URE_ATTACH_TX_CACHE;
+
+	/* Step 5c: Create RX processing taskq (single thread) */
+	sc->ure_rxq = ddi_taskq_create(dip, "ure_rx", 1,
+	    TASKQ_DEFAULTPRI, 0);
+	if (sc->ure_rxq == NULL) {
+		dev_err(dip, CE_WARN,
+		    "failed to create RX taskq");
+		goto fail;
+	}
+	sc->ure_attach_seq |= URE_ATTACH_RX_TASKQ;
 
 	/* Step 6: Read MAC address */
 	if (sc->ure_chip & (URE_CHIP_VER_4C00 |
