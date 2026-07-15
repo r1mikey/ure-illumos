@@ -21,6 +21,8 @@ MODULE		= ure
 
 CC		= gcc
 LD		= ld
+CTFCONVERT	= ctfconvert
+CTFMERGE	= ctfmerge
 
 #
 # Compiler flags for a kernel module.
@@ -45,7 +47,7 @@ CFLAGS_COMMON	= -D_KERNEL -D_ELF64 \
 CFLAGS_aarch64	= -mcmodel=large -mgeneral-regs-only
 CFLAGS_amd64	= -mcmodel=kernel -mno-red-zone -mno-mmx -mno-sse
 
-CFLAGS		= $(CFLAGS_COMMON) $(CFLAGS_$(KARCH))
+CFLAGS		= $(CFLAGS_COMMON) $(CFLAGS_$(KARCH)) -gdwarf-2
 
 INCLUDES	= -I. -I/build/arm64-gate/illumos-gate/usr/src/uts/common -I/build/arm64-gate/illumos-gate/usr/src/uts/common/sys
 
@@ -71,9 +73,11 @@ all: $(MODFILE)
 
 $(MODFILE): $(OBJS)
 	$(LD) -o $@ $(LDFLAGS) $(OBJS)
+	$(CTFMERGE) -l ure -o $@ $(OBJS)
 
 %.o: %.c urereg.h ure.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+	$(CTFCONVERT) -l ure $@
 
 clean:
 	rm -f $(OBJS) $(MODFILE)
