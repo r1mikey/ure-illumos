@@ -2914,15 +2914,22 @@ static int
 ure_open_pipes(ure_softc_t *sc)
 {
 	usb_pipe_policy_t policy;
+	usb_flags_t flags;
 	int ret;
 
 	/* Bulk IN — URE_RX_LIST_CNT concurrent transfers + headroom */
 	bzero(&policy, sizeof (policy));
 	policy.pp_max_async_reqs = URE_RX_LIST_CNT + 2;
 
+	flags = USB_FLAGS_SLEEP;
+
+#if defined(USB_FLAGS_START_NEXT_FIRST)
+	flags |= USB_FLAGS_START_NEXT_FIRST;
+#endif
+
 	ret = usb_pipe_xopen(sc->ure_dip,
 	    &sc->ure_bulkin_xdesc, &policy,
-	    USB_FLAGS_SLEEP, &sc->ure_bulkin_pipe);
+	    flags, &sc->ure_bulkin_pipe);
 	if (ret != USB_SUCCESS) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "failed to open bulk IN pipe: %d", ret);
@@ -2935,7 +2942,7 @@ ure_open_pipes(ure_softc_t *sc)
 
 	ret = usb_pipe_xopen(sc->ure_dip,
 	    &sc->ure_bulkout_xdesc, &policy,
-	    USB_FLAGS_SLEEP, &sc->ure_bulkout_pipe);
+	    flags, &sc->ure_bulkout_pipe);
 	if (ret != USB_SUCCESS) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "failed to open bulk OUT pipe: %d", ret);
