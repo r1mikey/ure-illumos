@@ -231,6 +231,7 @@ extern "C" {
 #define	URE_OCP_EEE_ADV		0xa5d0
 #define	URE_OCP_EEE_LPABLE	0xa5d2
 #define	URE_OCP_10GBT_CTRL	0xa5d4
+#define	URE_OCP_10GBT_STAT	0xa5d6
 #define	URE_OCP_PHY_STATE	0xa708
 #define	URE_OCP_ADC_CFG		0xbc06
 
@@ -610,9 +611,13 @@ extern "C" {
 #define	URE_ADC_EN		0x0080
 #define	URE_CKADSEL_L		0x0100
 
-/* 2.5G/5G advertisement */
+/* 2.5G/5G advertisement (OCP 0xa5d4) */
 #define	URE_ADV_2500TFDX	0x0080
 #define	URE_ADV_5000TFDX	0x0100
+
+/* 2.5G/5G link partner ability (OCP 0xa5d6) */
+#define	URE_LP_2500TFDX		0x0020
+#define	URE_LP_5000TFDX		0x0040
 
 /* MCU types for register index */
 #define	URE_MCU_TYPE_PLA	0x0100

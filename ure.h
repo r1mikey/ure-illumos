@@ -200,6 +200,8 @@ typedef struct ure_softc {
 	uint64_t		ure_link_speed;
 	link_duplex_t		ure_link_duplex;
 	ddi_periodic_t		ure_link_timer;
+	uint16_t		ure_10gbt_ctrl;	/* cached OCP 0xa5d4 */
+	uint16_t		ure_10gbt_stat;	/* cached OCP 0xa5d6 */
 
 	/* Chip identification */
 	uint_t			ure_flags;

@@ -1700,6 +1700,16 @@ ure_link_check(void *arg)
 			    LINK_DUPLEX_FULL : LINK_DUPLEX_HALF;
 		}
 
+		/*
+		 * Cache link partner 2.5G/5G ability from the
+		 * 10GBASE-T AN status register.
+		 */
+		if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B |
+		    URE_FLAG_8157)) {
+			sc->ure_10gbt_stat = ure_ocp_reg_read(sc,
+			    URE_OCP_10GBT_STAT);
+		}
+
 		/* Re-enable TX/RX on link up */
 		URE_SETBIT_1(sc, URE_PLA_CR, URE_MCU_TYPE_PLA,
 		    URE_CR_RE | URE_CR_TE);
@@ -1722,6 +1732,7 @@ ure_link_check(void *arg)
 			duplex = sc->ure_link_duplex;
 		} else {
 			new_link = LINK_STATE_DOWN;
+			sc->ure_10gbt_stat = 0;
 		}
 	}
 
@@ -2535,6 +2546,25 @@ ure_m_stat(void *arg, uint_t stat, uint64_t *val)
 	case ETHER_STAT_LINK_DUPLEX:
 		*val = sc->ure_link_duplex;
 		break;
+	case ETHER_STAT_CAP_2500FDX:
+		*val = !!(sc->ure_flags & (URE_FLAG_8156 |
+		    URE_FLAG_8156B | URE_FLAG_8157));
+		break;
+	case ETHER_STAT_ADV_CAP_2500FDX:
+		*val = !!(sc->ure_10gbt_ctrl & URE_ADV_2500TFDX);
+		break;
+	case ETHER_STAT_LP_CAP_2500FDX:
+		*val = !!(sc->ure_10gbt_stat & URE_LP_2500TFDX);
+		break;
+	case ETHER_STAT_CAP_5000FDX:
+		*val = !!(sc->ure_flags & URE_FLAG_8157);
+		break;
+	case ETHER_STAT_ADV_CAP_5000FDX:
+		*val = !!(sc->ure_10gbt_ctrl & URE_ADV_5000TFDX);
+		break;
+	case ETHER_STAT_LP_CAP_5000FDX:
+		*val = !!(sc->ure_10gbt_stat & URE_LP_5000TFDX);
+		break;
 	case MAC_STAT_MULTIRCV:
 		*val = sc->ure_stat_multircv;
 		break;
@@ -2804,6 +2834,16 @@ ure_m_getprop(void *arg, const char *pr_name,
 		ASSERT(pr_valsize >= sizeof (uint32_t));
 		bcopy(&sc->ure_mtu, pr_val, sizeof (uint32_t));
 		break;
+	case MAC_PROP_ADV_2500FDX_CAP:
+	case MAC_PROP_EN_2500FDX_CAP:
+		*(uint8_t *)pr_val =
+		    !!(sc->ure_10gbt_ctrl & URE_ADV_2500TFDX);
+		break;
+	case MAC_PROP_ADV_5000FDX_CAP:
+	case MAC_PROP_EN_5000FDX_CAP:
+		*(uint8_t *)pr_val =
+		    !!(sc->ure_10gbt_ctrl & URE_ADV_5000TFDX);
+		break;
 	default:
 		return (ENOTSUP);
 	}
@@ -2842,6 +2882,12 @@ ure_m_propinfo(void *arg, const char *pr_name,
 	case MAC_PROP_MTU:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
 		mac_prop_info_set_range_uint32(prh, ETHERMTU, ETHERMTU);
+		break;
+	case MAC_PROP_ADV_2500FDX_CAP:
+	case MAC_PROP_EN_2500FDX_CAP:
+	case MAC_PROP_ADV_5000FDX_CAP:
+	case MAC_PROP_EN_5000FDX_CAP:
+		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
 		break;
 	default:
 		break;
@@ -3181,6 +3227,17 @@ ure_chip_init(ure_softc_t *sc)
 		dev_err(sc->ure_dip, CE_WARN,
 		    "unknown chip version 0x%04x", ver);
 		break;
+	}
+
+	/*
+	 * Cache the 10GBASE-T AN control register for chips that
+	 * support 2.5G/5G.  This tells us what speeds the firmware
+	 * has enabled for autonegotiation advertisement.
+	 */
+	if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B |
+	    URE_FLAG_8157)) {
+		sc->ure_10gbt_ctrl = ure_ocp_reg_read(sc,
+		    URE_OCP_10GBT_CTRL);
 	}
 
 	/* Run chip-variant-specific init */
