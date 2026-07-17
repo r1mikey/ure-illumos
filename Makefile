@@ -21,8 +21,8 @@ MODULE		= ure
 
 CC		= gcc
 LD		= ld
-CTFCONVERT	= ctfconvert
-CTFMERGE	= ctfmerge
+CTFCONVERT	= /build/arm64-gate/illumos-gate/usr/src/tools/proto/root_i386-nd/opt/onbld/bin/i386/ctfconvert
+CTFMERGE	= /build/arm64-gate/illumos-gate/usr/src/tools/proto/root_i386-nd/opt/onbld/bin/i386/ctfmerge
 
 #
 # Compiler flags for a kernel module.
