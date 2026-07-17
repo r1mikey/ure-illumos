@@ -2453,7 +2453,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 			if (hck_flags & HCK_IPV4_HDRCKSUM) {
 				txcsum |= URE_TXPKT_IPV4;
 			}
-			if (hck_flags & HCK_FULLCKSUM) {
+			if (hck_flags & HCK_PARTIALCKSUM) {
 				struct ether_header *eh =
 				    (struct ether_header *)mp->b_rptr;
 				uint16_t etype = ntohs(eh->ether_type);
@@ -2927,8 +2927,7 @@ ure_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 			*flags = 0;
 			return (B_FALSE);
 		}
-		*flags = HCKSUM_IPHDRCKSUM | HCKSUM_INET_FULL_V4 |
-		    HCKSUM_INET_FULL_V6;
+		*flags = HCKSUM_IPHDRCKSUM | HCKSUM_INET_PARTIAL;
 		return (B_TRUE);
 	}
 	default:
