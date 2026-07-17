@@ -673,6 +673,17 @@ typedef struct ure_txpkt {
 #define	URE_TXPKT_L4_OFFSET_SHIFT	17
 #define	URE_TXPKT_L4_OFFSET_MAX	0x7ff
 
+/* TX TSO descriptor bits (opts1) */
+#define	URE_TXPKT_GTSENDV4	(1U << 28)	/* TSO IPv4 */
+#define	URE_TXPKT_GTSENDV6	(1U << 27)	/* TSO IPv6 */
+#define	URE_TXPKT_GTTCPHO_SHIFT	18		/* transport offset (TSO) */
+#define	URE_TXPKT_GTTCPHO_MAX	0x7fU		/* 7-bit field */
+#define	URE_TXPKT_TSO_LEN_MAX	0x3ffffU	/* 18-bit total len (TSO) */
+
+/* TX TSO descriptor bits (opts2) */
+#define	URE_TXPKT_MSS_SHIFT	17		/* MSS value */
+#define	URE_TXPKT_MSS_MAX	0x7ffU		/* 11-bit field, max 2047 */
+
 /* RX packet header v2 (RTL8157) */
 #pragma pack(1)
 typedef struct ure_rxpkt_v2 {

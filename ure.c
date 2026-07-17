@@ -2428,41 +2428,25 @@ ure_m_tx(void *arg, mblk_t *mp)
 		/* 2c. Write TX header */
 		if (sc->ure_flags & URE_FLAG_8157) {
 			ure_txpkt_v2_t txhdr;
-			bzero(&txhdr, sizeof (txhdr));
-			txhdr.ure_cmdstat = LE_32(
-			    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
-			txhdr.ure_pktlen = LE_32(mlen << 4);
-			txhdr.ure_signature = LE_32(
-			    URE_TXPKT_SIGNATURE);
-			bcopy(&txhdr, buf + sc->ure_txc_pos,
-			    sizeof (txhdr));
-		} else {
-			ure_txpkt_t txhdr;
-			uint32_t txcsum = 0;
+			uint32_t opts1, opts2 = 0;
+			uint32_t mss_val, lso_flag;
 
 			bzero(&txhdr, sizeof (txhdr));
-			txhdr.ure_pktlen = LE_32(mlen |
-			    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS);
+			opts1 = URE_TXPKT_TX_FS | URE_TXPKT_TX_LS;
 
-			/*
-			 * TX checksum offload (v1 only).
-			 */
-			uint32_t hck_flags;
-			mac_hcksum_get(mp, NULL, NULL, NULL, NULL,
-			    &hck_flags);
-			if (hck_flags & HCK_IPV4_HDRCKSUM) {
-				txcsum |= URE_TXPKT_IPV4;
-			}
-			if (hck_flags & HCK_PARTIALCKSUM) {
+			mac_lso_get(mp, &mss_val, &lso_flag);
+			if (lso_flag == HW_LSO) {
 				struct ether_header *eh =
 				    (struct ether_header *)mp->b_rptr;
-				uint16_t etype = ntohs(eh->ether_type);
+				uint16_t etype =
+				    ntohs(eh->ether_type);
 				uint32_t l3off =
 				    sizeof (struct ether_header);
 
 				if (etype == ETHERTYPE_VLAN) {
 					etype = ntohs(*(uint16_t *)
-					    (mp->b_rptr + l3off + 2));
+					    (mp->b_rptr + l3off +
+					    2));
 					l3off += VLAN_TAGSZ;
 				}
 				if (etype == ETHERTYPE_IP) {
@@ -2470,44 +2454,175 @@ ure_m_tx(void *arg, mblk_t *mp)
 					    (mp->b_rptr + l3off);
 					uint32_t l4off = l3off +
 					    IPH_HDR_LENGTH(ipha);
-
-					txcsum |= URE_TXPKT_IPV4;
-					if (ipha->ipha_protocol ==
-					    IPPROTO_TCP) {
-						txcsum |=
-						    URE_TXPKT_TCP;
-					} else if (ipha->ipha_protocol ==
-					    IPPROTO_UDP) {
-						txcsum |=
-						    URE_TXPKT_UDP;
-					}
-					txcsum |=
-					    (l4off &
-					    URE_TXPKT_L4_OFFSET_MAX) <<
-					    URE_TXPKT_L4_OFFSET_SHIFT;
-				} else if (etype == ETHERTYPE_IPV6) {
+					ipha->ipha_length = 0;
+					opts1 |= URE_TXPKT_GTSENDV4;
+					opts1 |= (l4off &
+					    URE_TXPKT_GTTCPHO_MAX) <<
+					    URE_TXPKT_GTTCPHO_SHIFT;
+				} else if (etype ==
+				    ETHERTYPE_IPV6) {
 					ip6_t *ip6 = (ip6_t *)
 					    (mp->b_rptr + l3off);
 					uint32_t l4off = l3off +
 					    sizeof (ip6_t);
+					ip6->ip6_plen = 0;
+					opts1 |= URE_TXPKT_GTSENDV6;
+					opts1 |= (l4off &
+					    URE_TXPKT_GTTCPHO_MAX) <<
+					    URE_TXPKT_GTTCPHO_SHIFT;
+				}
+				opts2 = MIN(mss_val,
+				    URE_TXPKT_MSS_MAX) <<
+				    URE_TXPKT_MSS_SHIFT;
+			}
 
-					txcsum |= URE_TXPKT_IPV6;
-					if (ip6->ip6_nxt ==
-					    IPPROTO_TCP) {
-						txcsum |=
-						    URE_TXPKT_TCP;
-					} else if (ip6->ip6_nxt ==
-					    IPPROTO_UDP) {
-						txcsum |=
-						    URE_TXPKT_UDP;
+			txhdr.ure_cmdstat = LE_32(mlen | opts1);
+			txhdr.ure_vlan = LE_32(opts2);
+			txhdr.ure_pktlen = LE_32(mlen << 4);
+			txhdr.ure_signature = LE_32(
+			    URE_TXPKT_SIGNATURE);
+			bcopy(&txhdr, buf + sc->ure_txc_pos,
+			    sizeof (txhdr));
+		} else {
+			ure_txpkt_t txhdr;
+			uint32_t opts1, opts2 = 0;
+			uint32_t mss_val, lso_flag;
+
+			bzero(&txhdr, sizeof (txhdr));
+			opts1 = mlen |
+			    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS;
+
+			mac_lso_get(mp, &mss_val, &lso_flag);
+			if (lso_flag == HW_LSO) {
+				/*
+				 * TSO: GTSENDV4/V6 + transport
+				 * offset in opts1, MSS in opts2.
+				 * Zero IP length - the chip fills
+				 * it per segment.
+				 */
+				struct ether_header *eh =
+				    (struct ether_header *)mp->b_rptr;
+				uint16_t etype =
+				    ntohs(eh->ether_type);
+				uint32_t l3off =
+				    sizeof (struct ether_header);
+
+				if (etype == ETHERTYPE_VLAN) {
+					etype = ntohs(*(uint16_t *)
+					    (mp->b_rptr + l3off +
+					    2));
+					l3off += VLAN_TAGSZ;
+				}
+				if (etype == ETHERTYPE_IP) {
+					ipha_t *ipha = (ipha_t *)
+					    (mp->b_rptr + l3off);
+					uint32_t l4off = l3off +
+					    IPH_HDR_LENGTH(ipha);
+					ipha->ipha_length = 0;
+					opts1 |= URE_TXPKT_GTSENDV4;
+					opts1 |= (l4off &
+					    URE_TXPKT_GTTCPHO_MAX) <<
+					    URE_TXPKT_GTTCPHO_SHIFT;
+				} else if (etype ==
+				    ETHERTYPE_IPV6) {
+					ip6_t *ip6 = (ip6_t *)
+					    (mp->b_rptr + l3off);
+					uint32_t l4off = l3off +
+					    sizeof (ip6_t);
+					ip6->ip6_plen = 0;
+					opts1 |= URE_TXPKT_GTSENDV6;
+					opts1 |= (l4off &
+					    URE_TXPKT_GTTCPHO_MAX) <<
+					    URE_TXPKT_GTTCPHO_SHIFT;
+				}
+				opts2 = MIN(mss_val,
+				    URE_TXPKT_MSS_MAX) <<
+				    URE_TXPKT_MSS_SHIFT;
+			} else {
+				/*
+				 * TX checksum offload.
+				 */
+				uint32_t hck_flags;
+				mac_hcksum_get(mp, NULL, NULL, NULL,
+				    NULL, &hck_flags);
+				if (hck_flags & HCK_IPV4_HDRCKSUM) {
+					opts2 |= URE_TXPKT_IPV4;
+				}
+				if (hck_flags & HCK_PARTIALCKSUM) {
+					struct ether_header *eh =
+					    (struct ether_header *)
+					    mp->b_rptr;
+					uint16_t etype =
+					    ntohs(eh->ether_type);
+					uint32_t l3off =
+					    sizeof (struct
+					    ether_header);
+
+					if (etype == ETHERTYPE_VLAN) {
+						etype =
+						    ntohs(*(uint16_t *)
+						    (mp->b_rptr +
+						    l3off + 2));
+						l3off += VLAN_TAGSZ;
 					}
-					txcsum |=
-					    (l4off &
-					    URE_TXPKT_L4_OFFSET_MAX) <<
-					    URE_TXPKT_L4_OFFSET_SHIFT;
+					if (etype == ETHERTYPE_IP) {
+						ipha_t *ipha =
+						    (ipha_t *)
+						    (mp->b_rptr +
+						    l3off);
+						uint32_t l4off =
+						    l3off +
+						    IPH_HDR_LENGTH(
+						    ipha);
+
+						opts2 |=
+						    URE_TXPKT_IPV4;
+						if (ipha->
+						    ipha_protocol ==
+						    IPPROTO_TCP) {
+							opts2 |=
+							    URE_TXPKT_TCP;
+						} else if (ipha->
+						    ipha_protocol ==
+						    IPPROTO_UDP) {
+							opts2 |=
+							    URE_TXPKT_UDP;
+						}
+						opts2 |=
+						    (l4off &
+						    URE_TXPKT_L4_OFFSET_MAX) <<
+						    URE_TXPKT_L4_OFFSET_SHIFT;
+					} else if (etype ==
+					    ETHERTYPE_IPV6) {
+						ip6_t *ip6 =
+						    (ip6_t *)
+						    (mp->b_rptr +
+						    l3off);
+						uint32_t l4off =
+						    l3off +
+						    sizeof (ip6_t);
+
+						opts2 |=
+						    URE_TXPKT_IPV6;
+						if (ip6->ip6_nxt ==
+						    IPPROTO_TCP) {
+							opts2 |=
+							    URE_TXPKT_TCP;
+						} else if (ip6->
+						    ip6_nxt ==
+						    IPPROTO_UDP) {
+							opts2 |=
+							    URE_TXPKT_UDP;
+						}
+						opts2 |=
+						    (l4off &
+						    URE_TXPKT_L4_OFFSET_MAX) <<
+						    URE_TXPKT_L4_OFFSET_SHIFT;
+					}
 				}
 			}
-			txhdr.ure_vlan = LE_32(txcsum);
+			txhdr.ure_pktlen = LE_32(opts1);
+			txhdr.ure_vlan = LE_32(opts2);
 
 			bcopy(&txhdr, buf + sc->ure_txc_pos,
 			    sizeof (txhdr));
@@ -2928,6 +3043,40 @@ ure_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 			return (B_FALSE);
 		}
 		*flags = HCKSUM_IPHDRCKSUM | HCKSUM_INET_PARTIAL;
+		return (B_TRUE);
+	}
+	case MAC_CAPAB_LSO: {
+		mac_capab_lso_t *cap_lso = (mac_capab_lso_t *)cap_data;
+		uint32_t hdrsize, lso_max_v4, lso_max_v6;
+
+		/*
+		 * LSO requires checksum offload.  Skip the 8152
+		 * (Fast Ethernet) - TSO is pointless at 100 Mbps.
+		 */
+		if (!sc->ure_lso_en || !sc->ure_hcksum_en ||
+		    (sc->ure_flags & URE_FLAG_8152)) {
+			return (B_FALSE);
+		}
+
+		hdrsize = (sc->ure_flags & URE_FLAG_8157) ?
+		    sizeof (ure_txpkt_v2_t) : sizeof (ure_txpkt_t);
+
+		/*
+		 * Maximum TCP payload that fits in one USB transfer:
+		 * buffer minus TX descriptor, worst-case L2 (VLAN),
+		 * maximum L3, and maximum TCP headers.
+		 */
+		lso_max_v4 = sc->ure_txbufsz - hdrsize -
+		    (sizeof (struct ether_header) + VLAN_TAGSZ) -
+		    60 - 60;
+		lso_max_v6 = sc->ure_txbufsz - hdrsize -
+		    (sizeof (struct ether_header) + VLAN_TAGSZ) -
+		    sizeof (ip6_t) - 60;
+
+		cap_lso->lso_flags = LSO_TX_BASIC_TCP_IPV4 |
+		    LSO_TX_BASIC_TCP_IPV6;
+		cap_lso->lso_basic_tcp_ipv4.lso_max = lso_max_v4;
+		cap_lso->lso_basic_tcp_ipv6.lso_max = lso_max_v6;
 		return (B_TRUE);
 	}
 	default:
@@ -3437,6 +3586,8 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	/* Read driver.conf tuneables */
 	sc->ure_hcksum_en = ddi_prop_get_int(DDI_DEV_T_ANY, dip,
 	    DDI_PROP_DONTPASS, "checksum", 1) != 0;
+	sc->ure_lso_en = ddi_prop_get_int(DDI_DEV_T_ANY, dip,
+	    DDI_PROP_DONTPASS, "lso", 1) != 0;
 	list_create(&sc->ure_mcast_list, sizeof (ure_mcast_entry_t),
 	    offsetof(ure_mcast_entry_t, node));
 
