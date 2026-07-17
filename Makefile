@@ -84,14 +84,14 @@ clean:
 
 install: $(MODFILE)
 	@echo "Installing $(MODULE) driver..."
-	cp $(MODFILE) $(DESTDIR)/$(MODULE)
-	chmod 755 $(DESTDIR)/$(MODULE)
+	pfexec cp $(MODFILE) $(DESTDIR)/$(MODULE)
+	pfexec chmod 755 $(DESTDIR)/$(MODULE)
 	@echo "Done. Run 'add_drv ure' or 'update_drv ure' to register."
 
 uninstall:
 	@echo "Removing $(MODULE) driver..."
-	-rem_drv $(MODULE) 2>/dev/null
-	rm -f $(DESTDIR)/$(MODULE)
+	-pfexec rem_drv $(MODULE) 2>/dev/null
+	pfexec rm -f $(DESTDIR)/$(MODULE)
 	@echo "Done."
 
 .PHONY: all clean install uninstall
