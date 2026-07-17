@@ -118,6 +118,7 @@
 #include <sys/strsubr.h>
 #include <sys/atomic.h>
 #include <inet/ip.h>
+#include <inet/ip6.h>
 
 #include "urereg.h"
 #include "ure.h"
@@ -2484,6 +2485,26 @@ ure_m_tx(void *arg, mblk_t *mp)
 					    (l4off &
 					    URE_TXPKT_L4_OFFSET_MAX) <<
 					    URE_TXPKT_L4_OFFSET_SHIFT;
+				} else if (etype == ETHERTYPE_IPV6) {
+					ip6_t *ip6 = (ip6_t *)
+					    (mp->b_rptr + l3off);
+					uint32_t l4off = l3off +
+					    sizeof (ip6_t);
+
+					txcsum |= URE_TXPKT_IPV6;
+					if (ip6->ip6_nxt ==
+					    IPPROTO_TCP) {
+						txcsum |=
+						    URE_TXPKT_TCP;
+					} else if (ip6->ip6_nxt ==
+					    IPPROTO_UDP) {
+						txcsum |=
+						    URE_TXPKT_UDP;
+					}
+					txcsum |=
+					    (l4off &
+					    URE_TXPKT_L4_OFFSET_MAX) <<
+					    URE_TXPKT_L4_OFFSET_SHIFT;
 				}
 			}
 			txhdr.ure_vlan = LE_32(txcsum);
@@ -2906,7 +2927,8 @@ ure_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 			*flags = 0;
 			return (B_FALSE);
 		}
-		*flags = HCKSUM_IPHDRCKSUM | HCKSUM_INET_FULL_V4;
+		*flags = HCKSUM_IPHDRCKSUM | HCKSUM_INET_FULL_V4 |
+		    HCKSUM_INET_FULL_V6;
 		return (B_TRUE);
 	}
 	default:
