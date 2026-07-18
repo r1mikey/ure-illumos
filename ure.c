@@ -2779,7 +2779,10 @@ ure_m_stop(void *arg)
 
 	mutex_enter(&sc->ure_lock);
 	sc->ure_running = B_FALSE;
+	sc->ure_link_state = LINK_STATE_DOWN;
 	mutex_exit(&sc->ure_lock);
+
+	mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
 
 	/* Discard any pending coalescing buffer */
 	ure_txc_discard(sc);
@@ -3740,6 +3743,15 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		goto fail;
 	}
 	sc->ure_attach_seq |= URE_ATTACH_MAC_REG;
+
+	/*
+	 * Report an initial link-down so that the first link-up from
+	 * the polling timer is a genuine down-to-up transition.  Without
+	 * this, IPv6 DAD may not trigger if the PHY was already up
+	 * (e.g. across a reboot without power cycle).
+	 */
+	sc->ure_link_state = LINK_STATE_DOWN;
+	mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
 
 	/* Step 10: Start link polling timer (1 second) */
 	sc->ure_link_timer = ddi_periodic_add(
