@@ -3291,7 +3291,7 @@ ure_chip_init(ure_softc_t *sc)
 	switch (ver) {
 	case 0x1030:
 		sc->ure_flags = URE_FLAG_8157;
-		sc->ure_txbufsz = URE_TX_BUFSZ;
+		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
 		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
 		sc->ure_phy_read = ure_rtl8157_ocp_reg_read;
 		sc->ure_phy_write = ure_rtl8157_ocp_reg_write;
