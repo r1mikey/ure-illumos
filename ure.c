@@ -146,6 +146,7 @@ static const uint8_t ure_bcast_addr[ETHERADDRL] =
 /* Forward declarations */
 static int	ure_attach(dev_info_t *, ddi_attach_cmd_t);
 static int	ure_detach(dev_info_t *, ddi_detach_cmd_t);
+static int	ure_quiesce(dev_info_t *);
 
 static int	ure_m_stat(void *, uint_t, uint64_t *);
 static int	ure_m_start(void *);
@@ -183,6 +184,8 @@ static int	ure_wait_for_flash(ure_softc_t *);
 static void	ure_reset_bmu(ure_softc_t *);
 static void	ure_disable_teredo(ure_softc_t *);
 static void	ure_reset(ure_softc_t *);
+static void	ure_phy_powerdown(ure_softc_t *);
+static void	ure_phy_powerup(ure_softc_t *);
 static void	ure_rxvlan(ure_softc_t *);
 static void	ure_set_rx_filter(ure_softc_t *);
 static void	ure_ifmedia_init(ure_softc_t *);
@@ -333,7 +336,7 @@ DDI_DEFINE_STREAM_OPS(
 	/* XXgetinfo */		NULL,
 	/* XXflag */		D_MP,
 	/* XXstream_tab */	NULL,
-	/* XXquiesce */		ddi_quiesce_not_needed
+	/* XXquiesce */		ure_quiesce
 );
 
 static struct modldrv ure_modldrv = {
@@ -668,6 +671,39 @@ static inline void
 ure_phy_write(ure_softc_t *sc, uint16_t addr, uint16_t data)
 {
 	sc->ure_phy_write(sc, addr, data);
+}
+
+/*
+ * Power down the PHY by setting BMCR PDOWN.  This drops the link
+ * on the wire so that the connected switch sees the port go down.
+ */
+static void
+ure_phy_powerdown(ure_softc_t *sc)
+{
+	uint16_t val;
+
+	val = ure_phy_read(sc, URE_OCP_BMCR);
+	if (!(val & URE_OCP_BMCR_PDOWN)) {
+		val |= URE_OCP_BMCR_PDOWN;
+		ure_phy_write(sc, URE_OCP_BMCR, val);
+	}
+}
+
+/*
+ * Clear BMCR PDOWN and restart auto-negotiation.  Called from the
+ * NIC reset path (ure_m_start) before enabling the receiver.
+ */
+static void
+ure_phy_powerup(ure_softc_t *sc)
+{
+	uint16_t val;
+
+	val = ure_phy_read(sc, URE_OCP_BMCR);
+	if (val & URE_OCP_BMCR_PDOWN) {
+		val &= ~URE_OCP_BMCR_PDOWN;
+		val |= URE_OCP_BMCR_ANE | URE_OCP_BMCR_RSAN;
+		ure_phy_write(sc, URE_OCP_BMCR, val);
+	}
 }
 
 
@@ -2747,6 +2783,9 @@ ure_m_start(void *arg)
 		return (EIO);
 	}
 
+	/* Ensure the PHY is powered up before NIC reset */
+	ure_phy_powerup(sc);
+
 	/* NIC reset */
 	if (sc->ure_flags & URE_FLAG_8152)
 		error = ure_rtl8152_nic_reset(sc);
@@ -2789,6 +2828,12 @@ ure_m_stop(void *arg)
 
 	/* Reset the chip to stop RX/TX */
 	ure_reset(sc);
+
+	/*
+	 * Power down the PHY so the link drops on the wire.
+	 * The nic_reset path in ure_m_start clears PDOWN.
+	 */
+	ure_phy_powerdown(sc);
 
 	/*
 	 * Drain pipes.  usb_pipe_reset(USB_FLAGS_SLEEP) waits for
@@ -3819,6 +3864,36 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 
 	ure_cleanup(sc);
 	ddi_soft_state_free(ure_statep, instance);
+
+	return (DDI_SUCCESS);
+}
+
+
+/*
+ * Best-effort quiesce for fast reboot and panic.  USB control transfers
+ * require a working interrupt pipeline, which may not be available in
+ * this context, so every write here is best-effort.  We try to stop
+ * the MAC and power down the PHY; if the USB transfer fails silently,
+ * at least we tried.
+ */
+static int
+ure_quiesce(dev_info_t *dip)
+{
+	ure_softc_t *sc;
+	int instance = ddi_get_instance(dip);
+
+	sc = ddi_get_soft_state(ure_statep, instance);
+	if (sc == NULL)
+		return (DDI_SUCCESS);
+
+	sc->ure_gone = B_TRUE;
+
+	/* Stop MAC RX/TX */
+	(void) ure_write_1(sc, URE_PLA_CR, URE_MCU_TYPE_PLA, 0);
+
+	/* Power down PHY */
+	ure_phy_write(sc, URE_OCP_BMCR,
+	    ure_phy_read(sc, URE_OCP_BMCR) | URE_OCP_BMCR_PDOWN);
 
 	return (DDI_SUCCESS);
 }

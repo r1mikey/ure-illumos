@@ -219,6 +219,10 @@ extern "C" {
 #define	URE_OCP_EEE_CONFIG2	0x2092
 #define	URE_OCP_EEE_CONFIG3	0x2094
 #define	URE_OCP_BASE_MII	0xa400
+#define	URE_OCP_BMCR		0xa400	/* MII control (register 0) */
+#define	URE_OCP_BMCR_PDOWN	0x0800	/* PHY power-down */
+#define	URE_OCP_BMCR_ANE	0x1000	/* auto-negotiation enable */
+#define	URE_OCP_BMCR_RSAN	0x0200	/* restart auto-negotiation */
 #define	URE_OCP_EEE_AR		0xa41a
 #define	URE_OCP_EEE_DATA	0xa41c
 #define	URE_OCP_PHY_STATUS	0xa420
