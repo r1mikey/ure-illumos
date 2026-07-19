@@ -164,7 +164,6 @@ static boolean_t	ure_m_getcapab(void *, mac_capab_t, void *);
 
 static void	ure_rx_start(ure_softc_t *);
 static void	ure_rx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
-static void	ure_rx_process(void *);
 static void	ure_tx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
 static void	ure_txc_submit(ure_softc_t *, ure_tx_chain_t *);
 static void	ure_txc_flush_locked(ure_softc_t *);
@@ -1840,13 +1839,12 @@ ure_rx_start(ure_softc_t *sc)
 /*
  * RX callback: called when a bulk IN transfer completes.
  *
- * This callback does the minimum work needed to keep the USB pipe
- * fed: detach the received data buffer, dispatch it to the RX taskq
- * for packet processing, and immediately resubmit the next transfer.
- * Moving packet parsing and mac_rx() off the USBA callback thread
- * eliminates the gap where the adapter has no outstanding transfer
- * and must hold incoming data in its FIFO, which improves RX
- * aggregation and throughput.
+ * Parses the aggregation buffer inline and passes the resulting mblk
+ * chain to mac_rx().  This simplifies the stop path: since all RX
+ * processing happens inside the USBA callback, usb_pipe_reset with
+ * USB_FLAGS_SLEEP drains both in-flight USB transfers and their
+ * callbacks, guaranteeing no mac_rx() call can occur after mc_stop
+ * returns (MAC rule R17).
  */
 static void
 ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
@@ -1876,27 +1874,164 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 		goto resubmit;
 	}
 
-	/*
-	 * Detach the data buffer and dispatch packet processing to
-	 * the RX taskq.  The softstate pointer is stashed in b_prev
-	 * to avoid a per-transfer heap allocation.  ddi_taskq_dispatch
-	 * takes a single void* argument and we need both the softstate
-	 * and the data buffer.  b_prev is unused at this point in the
-	 * mblk lifecycle (the buffer has been detached from the USB
-	 * request and is not yet on any mblk chain).
-	 */
+	/* Detach the data buffer from the USB request */
 	req->bulk_data = NULL;
-	data->b_prev = (mblk_t *)(uintptr_t)sc;
 
-	if (ddi_taskq_dispatch(sc->ure_rxq, ure_rx_process, data,
-	    DDI_NOSLEEP) != DDI_SUCCESS) {
-		atomic_add_64(&sc->ure_stat_ierrors, 1);
-		freemsg(data);
+	/* Parse aggregated packets and build an mblk chain */
+	{
+		mblk_t *head = NULL, *tail = NULL;
+		uint32_t total_len = MBLKL(data);
+		uint32_t hdrsize, align;
+
+		align = (sc->ure_flags & URE_FLAG_8157) ?
+		    URE_8157_BUF_ALIGN : URE_RX_BUF_ALIGN;
+		hdrsize = (sc->ure_flags & URE_FLAG_8157) ?
+		    sizeof (ure_rxpkt_v2_t) : sizeof (ure_rxpkt_t);
+
+		unsigned char *buf = data->b_rptr;
+		uint32_t off = 0;
+
+		while (total_len > hdrsize) {
+			mblk_t *mp;
+			int pktlen;
+			uint32_t rxvlan = 0, rxcsum = 0;
+
+			if (sc->ure_flags & URE_FLAG_8157) {
+				ure_rxpkt_v2_t rxhdr;
+				bcopy(buf + off, &rxhdr, sizeof (rxhdr));
+				pktlen = (LE_32(rxhdr.ure_pktlen) &
+				    URE_RXPKT_V2_LEN_MASK) >> 17;
+				rxcsum = LE_32(rxhdr.ure_csum);
+			} else {
+				ure_rxpkt_t rxhdr;
+				bcopy(buf + off, &rxhdr, sizeof (rxhdr));
+				pktlen = LE_32(rxhdr.ure_pktlen) &
+				    URE_RXPKT_LEN_MASK;
+				rxvlan = LE_32(rxhdr.ure_vlan);
+				rxcsum = LE_32(rxhdr.ure_csum);
+			}
+
+			off += hdrsize;
+			total_len -= hdrsize;
+
+			if (pktlen > ETHERMAX + VLAN_TAGSZ + ETHERFCSL) {
+				atomic_add_64(&sc->ure_stat_ierrors, 1);
+				break;
+			}
+
+			if (pktlen > (int)total_len || pktlen < ETHERMIN) {
+				atomic_add_64(&sc->ure_stat_ierrors, 1);
+				break;
+			}
+
+			/* Strip CRC */
+			int actual = pktlen - ETHERFCSL;
+			if (actual <= 0) {
+				atomic_add_64(&sc->ure_stat_ierrors, 1);
+				break;
+			}
+
+			mp = allocb(actual + VLAN_TAGSZ, BPRI_MED);
+			if (mp == NULL) {
+				atomic_add_64(&sc->ure_stat_norcvbuf, 1);
+				break;
+			}
+
+			bcopy(buf + off, mp->b_wptr, actual);
+			mp->b_wptr += actual;
+
+			/*
+			 * RX checksum offload.
+			 *
+			 * v1 (8152/8153/8153B/8156/8156B): protocol
+			 * type bits are in ure_vlan (DWORD 1), error
+			 * flags in ure_csum (DWORD 2).
+			 *
+			 * v2 (8157): both protocol type and error
+			 * flags are in ure_csum (DWORD 2).
+			 */
+			uint32_t hck_flags = 0;
+
+			if (sc->ure_flags & URE_FLAG_8157) {
+				if ((rxcsum & URE_RXPKT_V2_IPV4) &&
+				    !(rxcsum & URE_RXPKT_V2_IPSUMBAD))
+					hck_flags |= HCK_IPV4_HDRCKSUM_OK;
+				if ((rxcsum & (URE_RXPKT_V2_IPV4 |
+				    URE_RXPKT_V2_IPV6)) &&
+				    (((rxcsum & URE_RXPKT_V2_TCP) &&
+				    !(rxcsum & URE_RXPKT_V2_TCPSUMBAD)) ||
+				    ((rxcsum & URE_RXPKT_V2_UDP) &&
+				    !(rxcsum & URE_RXPKT_V2_UDPSUMBAD))))
+					hck_flags |= HCK_FULLCKSUM_OK;
+			} else {
+				if ((rxvlan & URE_RXPKT_IPV4) &&
+				    !(rxcsum & URE_RXPKT_IPSUMBAD))
+					hck_flags |= HCK_IPV4_HDRCKSUM_OK;
+				if ((rxvlan & (URE_RXPKT_IPV4 |
+				    URE_RXPKT_IPV6)) &&
+				    (((rxvlan & URE_RXPKT_TCP) &&
+				    !(rxcsum & URE_RXPKT_TCPSUMBAD)) ||
+				    ((rxvlan & URE_RXPKT_UDP) &&
+				    !(rxcsum & URE_RXPKT_UDPSUMBAD))))
+					hck_flags |= HCK_FULLCKSUM_OK;
+			}
+
+			if (hck_flags != 0)
+				mac_hcksum_set(mp, 0, 0, 0, 0, hck_flags);
+
+			if (ure_rxcsum_debug > 0) {
+				ure_rxcsum_debug--;
+				dev_err(sc->ure_dip, CE_NOTE,
+				    "!RX csum: vlan=0x%08x csum=0x%08x "
+				    "hck=0x%x pktlen=%d",
+				    rxvlan, rxcsum, hck_flags, pktlen);
+			}
+
+			/* Chain it */
+			if (head == NULL) {
+				head = tail = mp;
+			} else {
+				tail->b_next = mp;
+				tail = mp;
+			}
+
+			atomic_add_64(&sc->ure_stat_ipackets, 1);
+			atomic_add_64(&sc->ure_stat_rbytes, actual);
+
+			/* Multicast/broadcast RX stats */
+			if (mp->b_rptr[0] & 0x01) {
+				if (bcmp(mp->b_rptr, ure_bcast_addr,
+				    ETHERADDRL) == 0)
+					atomic_add_64(
+					    &sc->ure_stat_brdcstrcv, 1);
+				else
+					atomic_add_64(
+					    &sc->ure_stat_multircv, 1);
+			}
+
+			uint32_t consumed = P2ROUNDUP(pktlen, align);
+			if (consumed > total_len)
+				break;
+			off += consumed;
+			total_len -= consumed;
+		}
+
+		/* Pass received chain to MAC */
+		if (head != NULL) {
+			if (sc->ure_running && !sc->ure_gone)
+				mac_rx(sc->ure_mh, NULL, head);
+			else
+				freemsgchain(head);
+		}
 	}
-	data = NULL;	/* worker or error path owns it now */
+
+	freemsg(data);
+	data = NULL;
 
 resubmit:
-	req->bulk_data = NULL;
+	if (req->bulk_data != NULL) {
+		req->bulk_data = NULL;
+	}
 	usb_free_bulk_req(req);
 	if (data != NULL)
 		freemsg(data);
@@ -1908,35 +2043,6 @@ resubmit:
 		ure_rx_start(sc);
 	mutex_exit(&sc->ure_lock);
 }
-
-/*
- * RX packet processing: runs on the ure_rxq taskq thread.
- *
- * Each USB transfer buffer may contain multiple aggregated packets,
- * each preceded by a ure_rxpkt (or ure_rxpkt_v2 for RTL8157) header.
- * This function parses them out, copies each into its own mblk, and
- * passes the chain to mac_rx().
- */
-static void
-ure_rx_process(void *arg)
-{
-	mblk_t *data = (mblk_t *)arg;
-
-	/*
-	 * Recover the softstate pointer stashed by ure_rx_cb.
-	 * See the comment there for why b_prev is used.
-	 */
-	ure_softc_t *sc = (ure_softc_t *)(uintptr_t)data->b_prev;
-	data->b_prev = NULL;
-
-	mblk_t *head = NULL, *tail = NULL;
-	uint32_t total_len;
-	uint32_t hdrsize, align;
-	int pktlen;
-
-	total_len = MBLKL(data);
-
-	align = (sc->ure_flags & URE_FLAG_8157) ?
 	    URE_8157_BUF_ALIGN : URE_RX_BUF_ALIGN;
 	hdrsize = (sc->ure_flags & URE_FLAG_8157) ?
 	    sizeof (ure_rxpkt_v2_t) : sizeof (ure_rxpkt_t);
@@ -2867,8 +2973,11 @@ ure_m_stop(void *arg)
 	/*
 	 * Drain pipes.  usb_pipe_reset(USB_FLAGS_SLEEP) waits for
 	 * all in-flight transfers to complete and their callbacks
-	 * to return before it returns.  The callbacks will see
-	 * !ure_running under ure_lock and skip mac_tx_update.
+	 * to return before it returns.  Because RX packet processing
+	 * runs inline in the callback, this also guarantees that all
+	 * mac_rx() upcalls have completed (MAC rule R17).  The
+	 * callbacks will see !ure_running under ure_lock and skip
+	 * mac_tx_update.
 	 */
 	usb_pipe_reset(sc->ure_dip, sc->ure_bulkin_pipe,
 	    USB_FLAGS_SLEEP, NULL, 0);
@@ -3540,17 +3649,6 @@ ure_cleanup(ure_softc_t *sc)
 		sc->ure_attach_seq &= ~URE_ATTACH_TX_CACHE;
 	}
 
-	/*
-	 * Drain and destroy the RX taskq.  Pipes are already closed
-	 * so no new callbacks will dispatch; ddi_taskq_destroy waits
-	 * for any in-flight task to complete before returning.
-	 */
-	if (sc->ure_attach_seq & URE_ATTACH_RX_TASKQ) {
-		ddi_taskq_destroy(sc->ure_rxq);
-		sc->ure_rxq = NULL;
-		sc->ure_attach_seq &= ~URE_ATTACH_RX_TASKQ;
-	}
-
 	/* Free multicast address list */
 	{
 		ure_mcast_entry_t *me;
@@ -3742,16 +3840,6 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		    NULL, (void *)sc, NULL, 0);
 	}
 	sc->ure_attach_seq |= URE_ATTACH_TX_CACHE;
-
-	/* Step 5c: Create RX processing taskq (single thread) */
-	sc->ure_rxq = ddi_taskq_create(dip, "ure_rx", 1,
-	    TASKQ_DEFAULTPRI, 0);
-	if (sc->ure_rxq == NULL) {
-		dev_err(dip, CE_WARN,
-		    "failed to create RX taskq");
-		goto fail;
-	}
-	sc->ure_attach_seq |= URE_ATTACH_RX_TASKQ;
 
 	/* Step 6: Read MAC address */
 	if (sc->ure_chip & (URE_CHIP_VER_4C00 |
