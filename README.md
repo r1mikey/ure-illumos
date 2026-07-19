@@ -173,10 +173,6 @@ tail -f /var/adm/messages
 modinfo | grep ure
 ```
 
-## TODO / Future Work
-
-1. **VLAN tag offload** - hardware insert/strip via RX/TX packet header VLAN fields
-
 ## Design Notes
 
 The driver manages PHY state directly rather than using the illumos MII
@@ -186,6 +182,16 @@ USB bulk transfers (the RTL8157 adds a separate TGPHY path), and the
 RTL8156/8156B/8157 operate at 2.5G/5G which the MII framework has no
 support for.  MII integration would only cover the 8152/8153 and would
 not add meaningful functionality beyond what the driver already provides.
+
+Hardware VLAN tag insert/strip is not used.  The chips support out-of-band
+VLAN tagging via the RX/TX packet header VLAN fields (FreeBSD uses this
+with its M_VLANTAG mbuf mechanism), but the illumos MAC framework has no
+out-of-band VLAN tag interface.  Tags must remain in-band in the Ethernet
+frame.  Enabling hardware strip on RX would require re-inserting the tag
+before passing to mac_rx(); enabling hardware insert on TX would require
+parsing and removing the in-band tag to populate the descriptor.  Both
+add complexity for no benefit.  Hardware stripping is explicitly disabled
+in ure_rxvlan().
 
 ## References
 
