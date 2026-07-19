@@ -84,7 +84,7 @@ extern "C" {
 #endif
 
 /*
- * Chip type flags — set during attach based on PLA_TCR1 version.
+ * Chip type flags: set during attach based on PLA_TCR1 version.
  * Only one of the URE_FLAG_81xx bits should be set at a time.
  */
 #define	URE_FLAG_LINK		0x0001
@@ -96,7 +96,7 @@ extern "C" {
 #define	URE_FLAG_CHIP_MASK	0x01f0
 
 /*
- * Chip sub-version bits — finer-grained identification.
+ * Chip sub-version bits: finer-grained identification.
  */
 #define	URE_CHIP_VER_4C00	0x0001
 #define	URE_CHIP_VER_4C10	0x0002
@@ -108,18 +108,16 @@ extern "C" {
 #define	URE_CHIP_VER_7420	0x0080
 
 /*
- * Attach sequence tracking — each bit indicates a resource that
+ * Attach sequence tracking: each bit indicates a resource that
  * was successfully acquired and needs cleanup on detach.
  */
 #define	URE_ATTACH_USB		0x0001	/* usb_client_attach done */
 #define	URE_ATTACH_DEV_DATA	0x0002	/* usb_get_dev_data done */
 #define	URE_ATTACH_MUTEX	0x0004	/* mutexes initialised */
 #define	URE_ATTACH_CHIP_INIT	0x0008	/* chip init complete */
-#define	URE_ATTACH_MAC_ALLOC	0x0010	/* mac_alloc done */
 #define	URE_ATTACH_MAC_REG	0x0020	/* mac_register done */
 #define	URE_ATTACH_USB_EVT	0x0040	/* usb event cbs registered */
 #define	URE_ATTACH_LINK_TIMER	0x0080	/* link poll timer running */
-#define	URE_ATTACH_TX_SER	0x0100	/* TX serializer initialised */
 #define	URE_ATTACH_TX_CACHE	0x0200	/* TX chain kmem_cache created */
 #define	URE_ATTACH_RX_TASKQ	0x0400	/* RX processing taskq created */
 
@@ -147,7 +145,7 @@ typedef struct ure_mcast_entry {
 struct ure_softc;
 
 /*
- * TX chain — one per in-flight USB bulk OUT transfer.
+ * TX chain: one per in-flight USB bulk OUT transfer.
  * The aggregation buffer (uc_buf) is pre-allocated by the
  * kmem_cache constructor and reused across submits.
  */
@@ -163,10 +161,10 @@ typedef struct ure_tx_chain {
  * Per-instance softstate.
  *
  * Lock discipline:
- *   ure_lock    — protects softstate, link state, flags, RX path,
+ *   ure_lock    - protects softstate, link state, flags, RX path,
  *                 multicast hash, chip registers.  Never held during
  *                 bulk USB I/O.
- *   ure_tx_lock — protects ure_tx_cnt (TX in-flight counter) only.
+ *   ure_tx_lock - protects ure_tx_cnt (TX in-flight counter) only.
  *                 Brief hold; never held simultaneously with ure_lock.
  *
  * RX processing runs on the single-threaded ure_rxq DDI taskq to
@@ -231,7 +229,6 @@ typedef struct ure_softc {
 
 	/* TX state */
 	kmem_cache_t		*ure_tx_cache;	/* slab cache for tx chains */
-	usb_serialization_t	ure_tx_ser;	/* serializer for pipe submit */
 	uint_t			ure_tx_cnt;	/* xfers in flight (tx_lock) */
 	hrtime_t		ure_tx_watchdog; /* stuck TX detection (tx_lock) */
 

@@ -1,4 +1,4 @@
-# illumos `ure` Driver — Realtek RTL8152/8153/8156/8157 USB Ethernet
+# illumos ure Driver - Realtek RTL8152/8153/8156/8157 USB Ethernet
 
 ## Files
 
@@ -6,12 +6,12 @@
 |------|-------------|
 | `urereg.h` | Register definitions (PLA, USB, OCP, SRAM, RX/TX packet headers) |
 | `ure.h` | Driver softstate (`ure_softc_t`), flags, attach sequence tracking, macros |
-| `ure.c` | Main driver source — all chip variants, RX/TX, MAC callbacks, attach/detach |
+| `ure.c` | Main driver source: all chip variants, RX/TX, MAC callbacks, attach/detach |
 | `Makefile` | Out-of-tree build (standalone, no illumos source tree required) |
 
 ## Architecture
 
-- **Standalone driver** — does NOT use the `usbgem` framework
+- **Standalone driver** - does NOT use the `usbgem` framework
 - Registers directly with MAC (GLDv3) and USBA
 - All chip register access via USB vendor control transfers
 
@@ -20,7 +20,7 @@
 | Chip | Version | Speed | Flags |
 |------|---------|-------|-------|
 | RTL8152 | 0x4c00, 0x4c10 | 10/100 | `URE_FLAG_8152` |
-| RTL8153 | 0x5c00–0x5c30 | 10/100/1000 | (default) |
+| RTL8153 | 0x5c00-0x5c30 | 10/100/1000 | (default) |
 | RTL8153B | 0x6000, 0x6010 | 10/100/1000 | `URE_FLAG_8153B` |
 | RTL8156 | 0x7020, 0x7030 | 10/100/1000/2500 | `URE_FLAG_8156` |
 | RTL8156B | 0x7410, 0x7420 | 10/100/1000/2500 | `URE_FLAG_8156B` |
@@ -28,13 +28,15 @@
 
 ## Key Features
 
-- **RX aggregation** — multiple packets per USB bulk IN, parsed from `ure_rxpkt`/`ure_rxpkt_v2` headers
-- **TX aggregation** — multiple packets packed per USB bulk OUT with per-packet TX headers
-- **All chip init sequences** — RTL8152, RTL8153, RTL8153B, RTL8156/B, RTL8157
-- **FreeBSD spurious link-down workaround** — double-read BMSR (PR 252165)
-- **Robust attach/detach** — `ure_attach_seq` flags track every acquired resource; `ure_cleanup()` reverses in order
-- **USB disconnect/reconnect** — `usb_register_event_cbs` with `ure_gone` flag
-- **60+ device IDs** — Realtek, Lenovo, Microsoft, Samsung, TP-Link, D-Link, etc.
+- **RX aggregation** - multiple packets per USB bulk IN, parsed from `ure_rxpkt`/`ure_rxpkt_v2` headers
+- **TX aggregation** - multiple packets packed per USB bulk OUT with per-packet TX headers
+- **IPv4/TCP/UDP hardware checksum offload** (RX and TX)
+- **TCP segmentation offload** (TSO/LSO) for RTL8153 and RTL8157
+- **All chip init sequences** - RTL8152, RTL8153, RTL8153B, RTL8156/B, RTL8157
+- **FreeBSD spurious link-down workaround** - double-read BMSR (PR 252165)
+- **Robust attach/detach** - `ure_attach_seq` flags track every acquired resource; `ure_cleanup()` reverses in order
+- **USB disconnect/reconnect** - `usb_register_event_cbs` with `ure_gone` flag
+- **60+ device IDs** - Realtek, Lenovo, Microsoft, Samsung, TP-Link, D-Link, etc.
 
 ## Building
 
@@ -97,11 +99,11 @@ add_drv \
     -i '"usb0955,09ff"' \
     -i '"usb2b04,0132"' \
     -i '"usb2b04,013b"' \
-    -i '"usb0bda,8050"' \
-    -i '"usb0bda,8152"' \
+    -i '"usbbda,8050"' \
+    -i '"usbbda,8152"' \
     -i '"usbbda,8153"' \
-    -i '"usb0bda,8156"' \
-    -i '"usb0bda,8157"' \
+    -i '"usbbda,8156"' \
+    -i '"usbbda,8157"' \
     -i '"usb04e8,a101"' \
     -i '"usb0930,0a13"' \
     -i '"usb2357,0601"' \
@@ -141,7 +143,7 @@ replug:
 
 ```bash
 make && cp ure /kernel/drv/aarch64/ure
-# Plug device in — new module loads
+# Plug device in, new module loads
 ```
 
 ### Removing the driver completely
@@ -173,17 +175,11 @@ modinfo | grep ure
 
 ## TODO / Future Work
 
-These are marked with TODO comments in the source:
-
-1. **RX checksum offload** — parse `ure_rxpkt.ure_csum` flags, set `HCK_*` on mblk
-2. **TX checksum offload** — set TX header checksum flags from mblk `HCK_*`, including L4 offset calculation (FreeBSD has this)
-3. **VLAN tag offload** — hardware insert/strip via RX/TX packet header VLAN fields
-4. **Multicast hash rebuild on remove** — currently only adds; removing a multicast address doesn't clear the hash bit
-5. **mac_getprop/setprop** — expose speed/duplex/autoneg properties
-6. **Proper MII integration** — for 8152/8153/8153B, integrate with illumos MII framework instead of direct PHY polling
+1. **VLAN tag offload** - hardware insert/strip via RX/TX packet header VLAN fields
+2. **Proper MII integration** - for 8152/8153/8153B, integrate with illumos MII framework instead of direct PHY polling
 
 ## References
 
-- OpenBSD `if_ure.c` v1.37 (Kevin Lo, Jonathon Fletcher) — primary reference
-- FreeBSD `if_ure.c` (Kevin Lo) — TX checksum L4 offset, spurious link-down fix
-- illumos `usbecm.c` — MAC/USBA integration patterns
+- OpenBSD `if_ure.c` v1.37 (Kevin Lo, Jonathon Fletcher) - primary reference
+- FreeBSD `if_ure.c` (Kevin Lo) - TX checksum L4 offset, spurious link-down fix
+- illumos `usbecm.c` - MAC/USBA integration patterns

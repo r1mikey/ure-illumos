@@ -84,7 +84,7 @@
  *   - RX aggregation (multiple packets per USB bulk IN transfer)
  *   - TX aggregation (multiple packets per USB bulk OUT transfer)
  *   - IPv4/TCP/UDP hardware checksum offload (RX and TX)
- *   - Hardware VLAN tag insertion/stripping
+ *   - TCP segmentation offload (TSO/LSO) for RTL8153 and RTL8157
  *   - Multicast hash filter (64-bit, CRC32-BE)
  *
  * Reference implementations:
@@ -123,7 +123,7 @@
 #include "urereg.h"
 #include "ure.h"
 
-/* Debug logging — set to 1 to enable verbose attach/detach logging */
+/* Debug logging: set to 1 to enable verbose attach/detach logging */
 #define	URE_DEBUG	0
 
 #if URE_DEBUG
@@ -595,6 +595,8 @@ ure_ocp_reg_write(ure_softc_t *sc, uint16_t addr, uint16_t data)
 
 /*
  * RTL8157 uses a separate TGPHY interface for PHY access.
+ * The busy-waits use drv_usecwait() rather than delay() so
+ * that these functions are safe in quiesce/panic context.
  */
 static uint16_t
 ure_rtl8157_ocp_reg_read(ure_softc_t *sc, uint16_t addr)
@@ -605,7 +607,7 @@ ure_rtl8157_ocp_reg_read(ure_softc_t *sc, uint16_t addr)
 		if (!(ure_read_2(sc, URE_USB_TGPHY_CMD,
 		    URE_MCU_TYPE_USB) & URE_TGPHY_CMD_BUSY))
 			break;
-		delay(drv_usectohz(1000));
+		drv_usecwait(1000);
 	}
 	if (i == 10) {
 		dev_err(sc->ure_dip, CE_WARN,
@@ -622,7 +624,7 @@ ure_rtl8157_ocp_reg_read(ure_softc_t *sc, uint16_t addr)
 		if (!(ure_read_2(sc, URE_USB_TGPHY_CMD,
 		    URE_MCU_TYPE_USB) & URE_TGPHY_CMD_BUSY))
 			break;
-		delay(drv_usectohz(1000));
+		drv_usecwait(1000);
 	}
 	if (i == 10) {
 		dev_err(sc->ure_dip, CE_WARN,
@@ -651,7 +653,7 @@ ure_rtl8157_ocp_reg_write(ure_softc_t *sc, uint16_t addr,
 		if (!(ure_read_2(sc, URE_USB_TGPHY_CMD,
 		    URE_MCU_TYPE_USB) & URE_TGPHY_CMD_BUSY))
 			break;
-		delay(drv_usectohz(1000));
+		drv_usecwait(1000);
 	}
 	if (i == 10)
 		dev_err(sc->ure_dip, CE_WARN, "PHY write timeout");
@@ -1688,7 +1690,7 @@ ure_get_link_status(ure_softc_t *sc)
 }
 
 /*
- * Periodic link status check — called via ddi_periodic_add.
+ * Periodic link status check, called via ddi_periodic_add.
  * Includes FreeBSD spurious link-down workaround (PR 252165):
  * BMSR link status is latched-low, so we double-read to clear
  * any stale latch before trusting a link-down report.
@@ -1762,7 +1764,7 @@ ure_link_check(void *arg)
 		    URE_OCP_BASE_MII + 0x02);
 
 		if (bmsr & 0x0004) {	/* BMSR_LINK */
-			/* PHY still has link — spurious */
+			/* PHY still has link, spurious */
 			new_link = LINK_STATE_UP;
 			/* Keep previous speed/duplex */
 			speed = sc->ure_link_speed;
@@ -1786,7 +1788,7 @@ ure_link_check(void *arg)
 	}
 
 	/*
-	 * TX watchdog — detect transfers stuck beyond the bulk_timeout.
+	 * TX watchdog: detect transfers stuck beyond the bulk_timeout.
 	 * The 15-second threshold is 3× the 5-second bulk_timeout; if
 	 * USBA's exception callback hasn't fired by now, something is
 	 * genuinely wedged and a pipe reset is the only recovery.
@@ -1900,7 +1902,7 @@ ure_rx_start(ure_softc_t *sc)
 }
 
 /*
- * RX callback — called when a bulk IN transfer completes.
+ * RX callback: called when a bulk IN transfer completes.
  *
  * This callback does the minimum work needed to keep the USB pipe
  * fed: detach the received data buffer, dispatch it to the RX taskq
@@ -1941,7 +1943,7 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	/*
 	 * Detach the data buffer and dispatch packet processing to
 	 * the RX taskq.  The softstate pointer is stashed in b_prev
-	 * to avoid a per-transfer heap allocation — ddi_taskq_dispatch
+	 * to avoid a per-transfer heap allocation.  ddi_taskq_dispatch
 	 * takes a single void* argument and we need both the softstate
 	 * and the data buffer.  b_prev is unused at this point in the
 	 * mblk lifecycle (the buffer has been detached from the USB
@@ -1972,7 +1974,7 @@ resubmit:
 }
 
 /*
- * RX packet processing — runs on the ure_rxq taskq thread.
+ * RX packet processing: runs on the ure_rxq taskq thread.
  *
  * Each USB transfer buffer may contain multiple aggregated packets,
  * each preceded by a ure_rxpkt (or ure_rxpkt_v2 for RTL8157) header.
@@ -2450,8 +2452,17 @@ ure_m_tx(void *arg, mblk_t *mp)
 		if (aligned_pos + hdrsize + mlen >
 		    sc->ure_txc_chain->uc_bufmax) {
 			if (sc->ure_txc_chain->uc_npkts == 0) {
-				/* Oversized frame -- cannot fit at all */
-				break;
+				/*
+				 * Single frame exceeds the TX buffer.
+				 * Drop it and continue with the next.
+				 */
+				mblk_t *next = mp->b_next;
+				mp->b_next = NULL;
+				freemsg(mp);
+				mp = next;
+				atomic_add_64(
+				    &sc->ure_stat_oerrors, 1);
+				continue;
 			}
 			/* Buffer full -- flush and retry */
 			ure_txc_flush_locked(sc);
@@ -2510,6 +2521,88 @@ ure_m_tx(void *arg, mblk_t *mp)
 				opts2 = MIN(mss_val,
 				    URE_TXPKT_MSS_MAX) <<
 				    URE_TXPKT_MSS_SHIFT;
+			} else {
+				/*
+				 * Non-TSO TX checksum offload.
+				 */
+				uint32_t hck_flags;
+				mac_hcksum_get(mp, NULL, NULL, NULL,
+				    NULL, &hck_flags);
+				if (hck_flags & HCK_IPV4_HDRCKSUM) {
+					opts2 |= URE_TXPKT_IPV4;
+				}
+				if (hck_flags & HCK_PARTIALCKSUM) {
+					struct ether_header *eh =
+					    (struct ether_header *)
+					    mp->b_rptr;
+					uint16_t etype =
+					    ntohs(eh->ether_type);
+					uint32_t l3off =
+					    sizeof (struct
+					    ether_header);
+
+					if (etype == ETHERTYPE_VLAN) {
+						etype =
+						    ntohs(*(uint16_t *)
+						    (mp->b_rptr +
+						    l3off + 2));
+						l3off += VLAN_TAGSZ;
+					}
+					if (etype == ETHERTYPE_IP) {
+						ipha_t *ipha =
+						    (ipha_t *)
+						    (mp->b_rptr +
+						    l3off);
+						uint32_t l4off =
+						    l3off +
+						    IPH_HDR_LENGTH(
+						    ipha);
+
+						opts2 |=
+						    URE_TXPKT_IPV4;
+						if (ipha->
+						    ipha_protocol ==
+						    IPPROTO_TCP) {
+							opts2 |=
+							    URE_TXPKT_TCP;
+						} else if (ipha->
+						    ipha_protocol ==
+						    IPPROTO_UDP) {
+							opts2 |=
+							    URE_TXPKT_UDP;
+						}
+						opts2 |=
+						    (l4off &
+						    URE_TXPKT_L4_OFFSET_MAX) <<
+						    URE_TXPKT_L4_OFFSET_SHIFT;
+					} else if (etype ==
+					    ETHERTYPE_IPV6) {
+						ip6_t *ip6 =
+						    (ip6_t *)
+						    (mp->b_rptr +
+						    l3off);
+						uint32_t l4off =
+						    l3off +
+						    sizeof (ip6_t);
+
+						opts2 |=
+						    URE_TXPKT_IPV6;
+						if (ip6->ip6_nxt ==
+						    IPPROTO_TCP) {
+							opts2 |=
+							    URE_TXPKT_TCP;
+						} else if (ip6->
+						    ip6_nxt ==
+						    IPPROTO_UDP) {
+							opts2 |=
+							    URE_TXPKT_UDP;
+						}
+						opts2 |=
+						    (l4off &
+						    URE_TXPKT_L4_OFFSET_MAX) <<
+						    URE_TXPKT_L4_OFFSET_SHIFT;
+					}
+				}
 			}
 
 			txhdr.ure_cmdstat = LE_32(mlen | opts1);
@@ -3133,7 +3226,7 @@ ure_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 }
 
 /*
- * TX chain kmem_cache constructor — pre-allocates the aggregation
+ * TX chain kmem_cache constructor. Pre-allocates the aggregation
  * buffer so the TX hot path never calls allocb().
  */
 static int
@@ -3155,7 +3248,7 @@ ure_tx_chain_construct(void *buf, void *arg, int kmflags)
 }
 
 /*
- * TX chain kmem_cache destructor — frees the pre-allocated
+ * TX chain kmem_cache destructor. Frees the pre-allocated
  * aggregation buffer.
  */
 static void
@@ -3181,7 +3274,7 @@ ure_open_pipes(ure_softc_t *sc)
 	usb_flags_t flags;
 	int ret;
 
-	/* Bulk IN — URE_RX_LIST_CNT concurrent transfers + headroom */
+	/* Bulk IN: URE_RX_LIST_CNT concurrent transfers + headroom */
 	bzero(&policy, sizeof (policy));
 	policy.pp_max_async_reqs = URE_RX_LIST_CNT + 2;
 
@@ -3200,7 +3293,7 @@ ure_open_pipes(ure_softc_t *sc)
 		return (DDI_FAILURE);
 	}
 
-	/* Bulk OUT — URE_TX_MAX concurrent transfers + headroom */
+	/* Bulk OUT: URE_TX_MAX concurrent transfers + headroom */
 	bzero(&policy, sizeof (policy));
 	policy.pp_max_async_reqs = URE_TX_MAX + 4;
 
@@ -3307,6 +3400,8 @@ ure_reconnect_cb(dev_info_t *dip)
 		/* Setup MAC, TX/RX, filters */
 		ure_ifmedia_init(sc);
 		ure_set_rx_filter(sc);
+
+		sc->ure_running = B_TRUE;
 
 		/* Start RX */
 		ure_rx_start(sc);
@@ -3436,7 +3531,7 @@ ure_chip_init(ure_softc_t *sc)
 		break;
 	default:
 		/*
-		 * Unknown chip version — fall through to RTL8153 init.
+		 * Unknown chip version - fall through to RTL8153 init.
 		 * No ure_flags chip bit is set, so the init-variant
 		 * switch below will take the default (RTL8153) path.
 		 */
@@ -3502,7 +3597,7 @@ ure_cleanup(ure_softc_t *sc)
 
 	ure_close_pipes(sc);
 
-	/* Tear down TX cache and serializer (before mutexes) */
+	/* Tear down TX cache (before mutexes) */
 	if (sc->ure_attach_seq & URE_ATTACH_TX_CACHE) {
 		kmem_cache_destroy(sc->ure_tx_cache);
 		sc->ure_tx_cache = NULL;
@@ -3518,12 +3613,6 @@ ure_cleanup(ure_softc_t *sc)
 		ddi_taskq_destroy(sc->ure_rxq);
 		sc->ure_rxq = NULL;
 		sc->ure_attach_seq &= ~URE_ATTACH_RX_TASKQ;
-	}
-
-	if (sc->ure_attach_seq & URE_ATTACH_TX_SER) {
-		usb_fini_serialization(sc->ure_tx_ser);
-		sc->ure_tx_ser = NULL;
-		sc->ure_attach_seq &= ~URE_ATTACH_TX_SER;
 	}
 
 	/* Free multicast address list */
@@ -3703,11 +3792,8 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	ure_chip_init(sc);
 	sc->ure_attach_seq |= URE_ATTACH_CHIP_INIT;
 
-	/* Step 5a: Initialise TX serializer */
-	sc->ure_tx_ser = usb_init_serialization(dip,
-	    USB_INIT_SER_CHECK_SAME_THREAD);
+	/* Step 5a: Initialise TX state */
 	sc->ure_tx_cnt = 0;
-	sc->ure_attach_seq |= URE_ATTACH_TX_SER;
 
 	/* Step 5b: Create TX chain kmem_cache (needs ure_txbufsz) */
 	{
@@ -3856,7 +3942,7 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	/* Attempt MAC unregister first — may fail if busy */
+	/* Attempt MAC unregister first, may fail if busy */
 	if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
 		if (mac_disable(sc->ure_mh) != 0)
 			return (DDI_FAILURE);
