@@ -167,6 +167,8 @@ static void	ure_rx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
 static void	ure_tx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
 static void	ure_txc_submit(ure_softc_t *, ure_tx_chain_t *);
 static void	ure_txc_flush_locked(ure_softc_t *);
+static boolean_t	ure_tx_offload(ure_softc_t *, mblk_t **,
+		    uint32_t *, uint32_t *);
 static void	ure_txc_discard(ure_softc_t *);
 static void	ure_txc_timeout(void *);
 
@@ -2429,6 +2431,130 @@ ure_txc_timeout(void *arg)
 }
 
 /*
+ * TX offload descriptor setup.
+ *
+ * Derive offload descriptor bits from the mblk chain using
+ * mac_ether_offload_info() instead of manually parsing headers
+ * from mp->b_rptr.  MAC does not guarantee that the Ethernet, IP,
+ * and L4 headers are contiguous in the first mblk, so direct
+ * pointer casts into mp->b_rptr are unsafe for chained mblks.
+ *
+ * For TSO, the chip requires the IP length field to be zeroed
+ * before transmission.  This mutation requires contiguous access
+ * to the IP header, so we pull up the necessary bytes first.
+ *
+ * Returns B_TRUE on success (opts1/opts2 filled, mp possibly
+ * reallocated via pullup).  Returns B_FALSE if TSO was requested
+ * but the packet cannot be set up safely; caller should drop it.
+ */
+static boolean_t
+ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
+    uint32_t *opts1p, uint32_t *opts2p)
+{
+	mblk_t *mp = *mpp;
+	uint32_t opts1 = 0, opts2 = 0;
+	uint32_t mss_val, lso_flag;
+	mac_ether_offload_info_t meoi;
+
+	mac_lso_get(mp, &mss_val, &lso_flag);
+
+	if (lso_flag == HW_LSO) {
+		/*
+		 * TSO: need L2/L3/L4 info to set the transport
+		 * offset and zero the IP length field.
+		 */
+		mac_ether_offload_info(mp, &meoi);
+
+		if (!(meoi.meoi_flags & MEOI_L2INFO_SET) ||
+		    !(meoi.meoi_flags & MEOI_L3INFO_SET) ||
+		    !(meoi.meoi_flags & MEOI_L4INFO_SET) ||
+		    meoi.meoi_l4proto != IPPROTO_TCP) {
+			return (B_FALSE);
+		}
+
+		uint32_t l4off = meoi.meoi_l2hlen + meoi.meoi_l3hlen;
+
+		/*
+		 * The chip needs the IP length field zeroed.
+		 * Ensure the headers are contiguous so we can
+		 * safely write through a pointer.
+		 */
+		if (MBLKL(mp) < l4off) {
+			mblk_t *nmp = msgpullup(mp, l4off);
+			if (nmp == NULL) {
+				return (B_FALSE);
+			}
+			freemsg(mp);
+			mp = nmp;
+			*mpp = mp;
+		}
+
+		if (meoi.meoi_l3proto == ETHERTYPE_IP) {
+			ipha_t *ipha = (ipha_t *)
+			    (mp->b_rptr + meoi.meoi_l2hlen);
+			ipha->ipha_length = 0;
+			opts1 |= URE_TXPKT_GTSENDV4;
+		} else if (meoi.meoi_l3proto == ETHERTYPE_IPV6) {
+			ip6_t *ip6 = (ip6_t *)
+			    (mp->b_rptr + meoi.meoi_l2hlen);
+			ip6->ip6_plen = 0;
+			opts1 |= URE_TXPKT_GTSENDV6;
+		} else {
+			return (B_FALSE);
+		}
+
+		opts1 |= (l4off & URE_TXPKT_GTTCPHO_MAX) <<
+		    URE_TXPKT_GTTCPHO_SHIFT;
+		opts2 = MIN(mss_val, URE_TXPKT_MSS_MAX) <<
+		    URE_TXPKT_MSS_SHIFT;
+	} else {
+		/*
+		 * Non-TSO checksum offload.
+		 */
+		uint32_t hck_flags;
+		mac_hcksum_get(mp, NULL, NULL, NULL, NULL, &hck_flags);
+
+		if (hck_flags & HCK_IPV4_HDRCKSUM) {
+			opts2 |= URE_TXPKT_IPV4;
+		}
+		if (hck_flags & HCK_PARTIALCKSUM) {
+			mac_ether_offload_info(mp, &meoi);
+
+			if ((meoi.meoi_flags & MEOI_L2INFO_SET) &&
+			    (meoi.meoi_flags & MEOI_L3INFO_SET) &&
+			    (meoi.meoi_flags & MEOI_L4INFO_SET)) {
+				uint32_t l4off = meoi.meoi_l2hlen +
+				    meoi.meoi_l3hlen;
+
+				if (meoi.meoi_l3proto ==
+				    ETHERTYPE_IP) {
+					opts2 |= URE_TXPKT_IPV4;
+				} else if (meoi.meoi_l3proto ==
+				    ETHERTYPE_IPV6) {
+					opts2 |= URE_TXPKT_IPV6;
+				}
+
+				if (meoi.meoi_l4proto ==
+				    IPPROTO_TCP) {
+					opts2 |= URE_TXPKT_TCP;
+				} else if (meoi.meoi_l4proto ==
+				    IPPROTO_UDP) {
+					opts2 |= URE_TXPKT_UDP;
+				}
+
+				opts2 |= (l4off &
+				    URE_TXPKT_L4_OFFSET_MAX) <<
+				    URE_TXPKT_L4_OFFSET_SHIFT;
+			}
+		}
+	}
+
+	*opts1p = opts1;
+	*opts2p = opts2;
+	return (B_TRUE);
+}
+
+/*
  * mc_tx callback -- transmit a chain of mblk_t packets.
  *
  * Packs frames into a coalescing buffer.  The buffer is flushed to
@@ -2515,288 +2641,59 @@ ure_m_tx(void *arg, mblk_t *mp)
 		buf = sc->ure_txc_chain->uc_buf->b_rptr;
 
 		/* 2c. Write TX header */
-		if (sc->ure_flags & URE_FLAG_8157) {
-			ure_txpkt_v2_t txhdr;
-			uint32_t opts1, opts2 = 0;
-			uint32_t mss_val, lso_flag;
+		{
+			uint32_t ofl_opts1 = 0, ofl_opts2 = 0;
+			mblk_t *next = mp->b_next;
+			mp->b_next = NULL;
 
-			bzero(&txhdr, sizeof (txhdr));
-			opts1 = URE_TXPKT_TX_FS | URE_TXPKT_TX_LS;
-
-			mac_lso_get(mp, &mss_val, &lso_flag);
-			if (lso_flag == HW_LSO) {
-				struct ether_header *eh =
-				    (struct ether_header *)mp->b_rptr;
-				uint16_t etype =
-				    ntohs(eh->ether_type);
-				uint32_t l3off =
-				    sizeof (struct ether_header);
-
-				if (etype == ETHERTYPE_VLAN) {
-					etype = ntohs(*(uint16_t *)
-					    (mp->b_rptr + l3off +
-					    2));
-					l3off += VLAN_TAGSZ;
-				}
-				if (etype == ETHERTYPE_IP) {
-					ipha_t *ipha = (ipha_t *)
-					    (mp->b_rptr + l3off);
-					uint32_t l4off = l3off +
-					    IPH_HDR_LENGTH(ipha);
-					ipha->ipha_length = 0;
-					opts1 |= URE_TXPKT_GTSENDV4;
-					opts1 |= (l4off &
-					    URE_TXPKT_GTTCPHO_MAX) <<
-					    URE_TXPKT_GTTCPHO_SHIFT;
-				} else if (etype ==
-				    ETHERTYPE_IPV6) {
-					ip6_t *ip6 = (ip6_t *)
-					    (mp->b_rptr + l3off);
-					uint32_t l4off = l3off +
-					    sizeof (ip6_t);
-					ip6->ip6_plen = 0;
-					opts1 |= URE_TXPKT_GTSENDV6;
-					opts1 |= (l4off &
-					    URE_TXPKT_GTTCPHO_MAX) <<
-					    URE_TXPKT_GTTCPHO_SHIFT;
-				}
-				opts2 = MIN(mss_val,
-				    URE_TXPKT_MSS_MAX) <<
-				    URE_TXPKT_MSS_SHIFT;
-			} else {
+			if (!ure_tx_offload(sc, &mp, &ofl_opts1,
+			    &ofl_opts2)) {
 				/*
-				 * Non-TSO TX checksum offload.
+				 * TSO setup failed (pullup or
+				 * unsupported protocol).  Drop the
+				 * unsegmented packet.
 				 */
-				uint32_t hck_flags;
-				mac_hcksum_get(mp, NULL, NULL, NULL,
-				    NULL, &hck_flags);
-				if (hck_flags & HCK_IPV4_HDRCKSUM) {
-					opts2 |= URE_TXPKT_IPV4;
-				}
-				if (hck_flags & HCK_PARTIALCKSUM) {
-					struct ether_header *eh =
-					    (struct ether_header *)
-					    mp->b_rptr;
-					uint16_t etype =
-					    ntohs(eh->ether_type);
-					uint32_t l3off =
-					    sizeof (struct
-					    ether_header);
-
-					if (etype == ETHERTYPE_VLAN) {
-						etype =
-						    ntohs(*(uint16_t *)
-						    (mp->b_rptr +
-						    l3off + 2));
-						l3off += VLAN_TAGSZ;
-					}
-					if (etype == ETHERTYPE_IP) {
-						ipha_t *ipha =
-						    (ipha_t *)
-						    (mp->b_rptr +
-						    l3off);
-						uint32_t l4off =
-						    l3off +
-						    IPH_HDR_LENGTH(
-						    ipha);
-
-						opts2 |=
-						    URE_TXPKT_IPV4;
-						if (ipha->
-						    ipha_protocol ==
-						    IPPROTO_TCP) {
-							opts2 |=
-							    URE_TXPKT_TCP;
-						} else if (ipha->
-						    ipha_protocol ==
-						    IPPROTO_UDP) {
-							opts2 |=
-							    URE_TXPKT_UDP;
-						}
-						opts2 |=
-						    (l4off &
-						    URE_TXPKT_L4_OFFSET_MAX) <<
-						    URE_TXPKT_L4_OFFSET_SHIFT;
-					} else if (etype ==
-					    ETHERTYPE_IPV6) {
-						ip6_t *ip6 =
-						    (ip6_t *)
-						    (mp->b_rptr +
-						    l3off);
-						uint32_t l4off =
-						    l3off +
-						    sizeof (ip6_t);
-
-						opts2 |=
-						    URE_TXPKT_IPV6;
-						if (ip6->ip6_nxt ==
-						    IPPROTO_TCP) {
-							opts2 |=
-							    URE_TXPKT_TCP;
-						} else if (ip6->
-						    ip6_nxt ==
-						    IPPROTO_UDP) {
-							opts2 |=
-							    URE_TXPKT_UDP;
-						}
-						opts2 |=
-						    (l4off &
-						    URE_TXPKT_L4_OFFSET_MAX) <<
-						    URE_TXPKT_L4_OFFSET_SHIFT;
-					}
-				}
+				freemsg(mp);
+				mp = next;
+				atomic_add_64(
+				    &sc->ure_stat_oerrors, 1);
+				continue;
 			}
+			mp->b_next = next;
 
-			txhdr.ure_cmdstat = LE_32(mlen | opts1);
-			txhdr.ure_vlan = LE_32(opts2);
-			txhdr.ure_pktlen = LE_32(mlen << 4);
-			txhdr.ure_signature = LE_32(
-			    URE_TXPKT_SIGNATURE);
-			bcopy(&txhdr, buf + sc->ure_txc_pos,
-			    sizeof (txhdr));
-		} else {
-			ure_txpkt_t txhdr;
-			uint32_t opts1, opts2 = 0;
-			uint32_t mss_val, lso_flag;
+			/*
+			 * msgsize may have changed after pullup,
+			 * update our copy.
+			 */
+			mlen = msgsize(mp);
 
-			bzero(&txhdr, sizeof (txhdr));
-			opts1 = mlen |
-			    URE_TXPKT_TX_FS | URE_TXPKT_TX_LS;
+			if (sc->ure_flags & URE_FLAG_8157) {
+				ure_txpkt_v2_t txhdr;
 
-			mac_lso_get(mp, &mss_val, &lso_flag);
-			if (lso_flag == HW_LSO) {
-				/*
-				 * TSO: GTSENDV4/V6 + transport
-				 * offset in opts1, MSS in opts2.
-				 * Zero IP length - the chip fills
-				 * it per segment.
-				 */
-				struct ether_header *eh =
-				    (struct ether_header *)mp->b_rptr;
-				uint16_t etype =
-				    ntohs(eh->ether_type);
-				uint32_t l3off =
-				    sizeof (struct ether_header);
-
-				if (etype == ETHERTYPE_VLAN) {
-					etype = ntohs(*(uint16_t *)
-					    (mp->b_rptr + l3off +
-					    2));
-					l3off += VLAN_TAGSZ;
-				}
-				if (etype == ETHERTYPE_IP) {
-					ipha_t *ipha = (ipha_t *)
-					    (mp->b_rptr + l3off);
-					uint32_t l4off = l3off +
-					    IPH_HDR_LENGTH(ipha);
-					ipha->ipha_length = 0;
-					opts1 |= URE_TXPKT_GTSENDV4;
-					opts1 |= (l4off &
-					    URE_TXPKT_GTTCPHO_MAX) <<
-					    URE_TXPKT_GTTCPHO_SHIFT;
-				} else if (etype ==
-				    ETHERTYPE_IPV6) {
-					ip6_t *ip6 = (ip6_t *)
-					    (mp->b_rptr + l3off);
-					uint32_t l4off = l3off +
-					    sizeof (ip6_t);
-					ip6->ip6_plen = 0;
-					opts1 |= URE_TXPKT_GTSENDV6;
-					opts1 |= (l4off &
-					    URE_TXPKT_GTTCPHO_MAX) <<
-					    URE_TXPKT_GTTCPHO_SHIFT;
-				}
-				opts2 = MIN(mss_val,
-				    URE_TXPKT_MSS_MAX) <<
-				    URE_TXPKT_MSS_SHIFT;
+				bzero(&txhdr, sizeof (txhdr));
+				txhdr.ure_cmdstat = LE_32(mlen |
+				    URE_TXPKT_TX_FS |
+				    URE_TXPKT_TX_LS | ofl_opts1);
+				txhdr.ure_vlan = LE_32(ofl_opts2);
+				txhdr.ure_pktlen =
+				    LE_32(mlen << 4);
+				txhdr.ure_signature = LE_32(
+				    URE_TXPKT_SIGNATURE);
+				bcopy(&txhdr,
+				    buf + sc->ure_txc_pos,
+				    sizeof (txhdr));
 			} else {
-				/*
-				 * TX checksum offload.
-				 */
-				uint32_t hck_flags;
-				mac_hcksum_get(mp, NULL, NULL, NULL,
-				    NULL, &hck_flags);
-				if (hck_flags & HCK_IPV4_HDRCKSUM) {
-					opts2 |= URE_TXPKT_IPV4;
-				}
-				if (hck_flags & HCK_PARTIALCKSUM) {
-					struct ether_header *eh =
-					    (struct ether_header *)
-					    mp->b_rptr;
-					uint16_t etype =
-					    ntohs(eh->ether_type);
-					uint32_t l3off =
-					    sizeof (struct
-					    ether_header);
+				ure_txpkt_t txhdr;
 
-					if (etype == ETHERTYPE_VLAN) {
-						etype =
-						    ntohs(*(uint16_t *)
-						    (mp->b_rptr +
-						    l3off + 2));
-						l3off += VLAN_TAGSZ;
-					}
-					if (etype == ETHERTYPE_IP) {
-						ipha_t *ipha =
-						    (ipha_t *)
-						    (mp->b_rptr +
-						    l3off);
-						uint32_t l4off =
-						    l3off +
-						    IPH_HDR_LENGTH(
-						    ipha);
-
-						opts2 |=
-						    URE_TXPKT_IPV4;
-						if (ipha->
-						    ipha_protocol ==
-						    IPPROTO_TCP) {
-							opts2 |=
-							    URE_TXPKT_TCP;
-						} else if (ipha->
-						    ipha_protocol ==
-						    IPPROTO_UDP) {
-							opts2 |=
-							    URE_TXPKT_UDP;
-						}
-						opts2 |=
-						    (l4off &
-						    URE_TXPKT_L4_OFFSET_MAX) <<
-						    URE_TXPKT_L4_OFFSET_SHIFT;
-					} else if (etype ==
-					    ETHERTYPE_IPV6) {
-						ip6_t *ip6 =
-						    (ip6_t *)
-						    (mp->b_rptr +
-						    l3off);
-						uint32_t l4off =
-						    l3off +
-						    sizeof (ip6_t);
-
-						opts2 |=
-						    URE_TXPKT_IPV6;
-						if (ip6->ip6_nxt ==
-						    IPPROTO_TCP) {
-							opts2 |=
-							    URE_TXPKT_TCP;
-						} else if (ip6->
-						    ip6_nxt ==
-						    IPPROTO_UDP) {
-							opts2 |=
-							    URE_TXPKT_UDP;
-						}
-						opts2 |=
-						    (l4off &
-						    URE_TXPKT_L4_OFFSET_MAX) <<
-						    URE_TXPKT_L4_OFFSET_SHIFT;
-					}
-				}
+				bzero(&txhdr, sizeof (txhdr));
+				txhdr.ure_pktlen = LE_32(mlen |
+				    URE_TXPKT_TX_FS |
+				    URE_TXPKT_TX_LS | ofl_opts1);
+				txhdr.ure_vlan = LE_32(ofl_opts2);
+				bcopy(&txhdr,
+				    buf + sc->ure_txc_pos,
+				    sizeof (txhdr));
 			}
-			txhdr.ure_pktlen = LE_32(opts1);
-			txhdr.ure_vlan = LE_32(opts2);
-
-			bcopy(&txhdr, buf + sc->ure_txc_pos,
-			    sizeof (txhdr));
 		}
 		sc->ure_txc_pos += hdrsize;
 
