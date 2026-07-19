@@ -3851,10 +3851,19 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	case DDI_DETACH:
 		break;
 	case DDI_SUSPEND:
+		/*
+		 * Stop data paths first, then quiesce the hardware,
+		 * then mark the device gone.  ure_running = B_FALSE
+		 * is sufficient to stop new RX/TX activity and make
+		 * callbacks bail out.  ure_gone must remain B_FALSE
+		 * until after ure_reset() so that the register writes
+		 * inside ure_reset() can reach the device via
+		 * ure_ctl(), which returns USB_FAILURE immediately
+		 * when ure_gone is true.
+		 */
 		mutex_enter(&sc->ure_lock);
 		sc->ure_was_running = sc->ure_running;
 		sc->ure_running = B_FALSE;
-		sc->ure_gone = B_TRUE;
 		sc->ure_link_state = LINK_STATE_UNKNOWN;
 		mutex_exit(&sc->ure_lock);
 
@@ -3864,7 +3873,8 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		/*
 		 * Reset the chip to quiesce DMA, then drain any
 		 * in-flight USB transfers.  The callbacks will see
-		 * !ure_running and skip mac_rx/mac_tx_update.
+		 * !ure_running under ure_lock and skip
+		 * mac_rx/mac_tx_update.
 		 */
 		ure_reset(sc);
 
@@ -3872,6 +3882,10 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		    USB_FLAGS_SLEEP, NULL, 0);
 		usb_pipe_reset(sc->ure_dip, sc->ure_bulkout_pipe,
 		    USB_FLAGS_SLEEP, NULL, 0);
+
+		mutex_enter(&sc->ure_lock);
+		sc->ure_gone = B_TRUE;
+		mutex_exit(&sc->ure_lock);
 
 		return (DDI_SUCCESS);
 	default:
@@ -3908,14 +3922,18 @@ ure_quiesce(dev_info_t *dip)
 	if (sc == NULL)
 		return (DDI_SUCCESS);
 
-	sc->ure_gone = B_TRUE;
-
 	/* Stop MAC RX/TX */
 	(void) ure_write_1(sc, URE_PLA_CR, URE_MCU_TYPE_PLA, 0);
 
 	/* Power down PHY */
 	ure_phy_write(sc, URE_OCP_BMCR,
 	    ure_phy_read(sc, URE_OCP_BMCR) | URE_OCP_BMCR_PDOWN);
+
+	/*
+	 * Mark gone only after the best-effort register writes above
+	 * have had their chance to reach the device.
+	 */
+	sc->ure_gone = B_TRUE;
 
 	return (DDI_SUCCESS);
 }
