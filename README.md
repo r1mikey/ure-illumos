@@ -176,7 +176,16 @@ modinfo | grep ure
 ## TODO / Future Work
 
 1. **VLAN tag offload** - hardware insert/strip via RX/TX packet header VLAN fields
-2. **Proper MII integration** - for 8152/8153/8153B, integrate with illumos MII framework instead of direct PHY polling
+
+## Design Notes
+
+The driver manages PHY state directly rather than using the illumos MII
+framework.  The MII framework assumes standard MDIO bus access and tops
+out at 1000BASE-T.  These chips use Realtek's OCP register interface over
+USB bulk transfers (the RTL8157 adds a separate TGPHY path), and the
+RTL8156/8156B/8157 operate at 2.5G/5G which the MII framework has no
+support for.  MII integration would only cover the 8152/8153 and would
+not add meaningful functionality beyond what the driver already provides.
 
 ## References
 
