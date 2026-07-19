@@ -21,8 +21,8 @@ MODULE		= ure
 
 CC		= gcc
 LD		= ld
-CTFCONVERT	= /build/arm64-gate/illumos-gate/usr/src/tools/proto/root_i386-nd/opt/onbld/bin/i386/ctfconvert
-CTFMERGE	= /build/arm64-gate/illumos-gate/usr/src/tools/proto/root_i386-nd/opt/onbld/bin/i386/ctfmerge
+CTFCONVERT	= /build/illumos-gate/usr/src/tools/proto/root_i386-nd/opt/onbld/bin/i386/ctfconvert
+CTFMERGE	= /build/illumos-gate/usr/src/tools/proto/root_i386-nd/opt/onbld/bin/i386/ctfmerge
 
 #
 # Compiler flags for a kernel module.
@@ -49,7 +49,7 @@ CFLAGS_amd64	= -mcmodel=kernel -mno-red-zone -mno-mmx -mno-sse
 
 CFLAGS		= $(CFLAGS_COMMON) $(CFLAGS_$(KARCH)) -gdwarf-2
 
-INCLUDES	= -I. -I/build/arm64-gate/illumos-gate/usr/src/uts/common -I/build/arm64-gate/illumos-gate/usr/src/uts/common/sys
+INCLUDES	= -I. -I/build/illumos-gate/usr/src/uts/common -I/build/illumos-gate/usr/src/uts/common/sys
 
 #
 # Linker flags for a loadable kernel module.
