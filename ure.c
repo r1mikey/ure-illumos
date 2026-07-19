@@ -73,24 +73,23 @@
  * without using the usbgem USB NIC framework.
  *
  * The driver supports:
- *   - RTL8152  (USB 2.0, 10/100 Mbps)
- *   - RTL8153  (USB 3.0, 10/100/1000 Mbps)
- *   - RTL8153B (USB 3.0, 10/100/1000 Mbps)
- *   - RTL8156  (USB 3.0, 10/100/1000/2500 Mbps)
- *   - RTL8156B (USB 3.0, 10/100/1000/2500 Mbps)
- *   - RTL8157  (USB 3.0, 10/100/1000/2500/5000 Mbps)
+ * - RTL8152  (USB 2.0, 10/100 Mbps)
+ * - RTL8153  (USB 3.0, 10/100/1000 Mbps)
+ * - RTL8153B (USB 3.0, 10/100/1000 Mbps)
+ * - RTL8156  (USB 3.0, 10/100/1000/2500 Mbps)
+ * - RTL8156B (USB 3.0, 10/100/1000/2500 Mbps)
+ * - RTL8157  (USB 3.0, 10/100/1000/2500/5000 Mbps)
  *
  * Key features:
- *   - RX aggregation (multiple packets per USB bulk IN transfer)
- *   - TX aggregation (multiple packets per USB bulk OUT transfer)
- *   - IPv4/TCP/UDP hardware checksum offload (RX and TX)
- *   - TCP segmentation offload (TSO/LSO) for RTL8153 and RTL8157
- *   - Multicast hash filter (64-bit, CRC32-BE)
+ * - RX aggregation (multiple packets per USB bulk IN transfer)
+ * - TX aggregation (multiple packets per USB bulk OUT transfer)
+ * - IPv4/IPv6/TCP/UDP hardware checksum offload (RX and TX)
+ * - TCP segmentation offload (TSO/LSO) (not for RTL8152)
  *
  * Reference implementations:
- *   - OpenBSD if_ure.c (v1.37, Kevin Lo, Jonathon Fletcher)
- *   - FreeBSD if_ure.c (Kevin Lo)
- *   - FreeBSD spurious link-down BMSR workaround (PR 252165)
+ * - OpenBSD if_ure.c (v1.37, Kevin Lo, Jonathon Fletcher)
+ * - FreeBSD if_ure.c (Kevin Lo)
+ * - FreeBSD spurious link-down BMSR workaround (PR 252165)
  *
  * All register access is via USB vendor control transfers.  The chip
  * has two register spaces: PLA (Protocol Logic Adapter) at index
