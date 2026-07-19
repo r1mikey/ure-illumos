@@ -249,22 +249,18 @@ static usb_event_t ure_events = {
 
 /* MAC callbacks */
 static mac_callbacks_t ure_mac_callbacks = {
-	MC_GETCAPAB | MC_SETPROP | MC_GETPROP | MC_PROPINFO,
-	ure_m_stat,
-	ure_m_start,
-	ure_m_stop,
-	ure_m_promisc,
-	ure_m_multicst,
-	ure_m_unicst,
-	ure_m_tx,
-	NULL,		/* mc_reserved */
-	NULL,		/* mc_ioctl */
-	ure_m_getcapab,
-	NULL,		/* mc_open */
-	NULL,		/* mc_close */
-	ure_m_setprop,
-	ure_m_getprop,
-	ure_m_propinfo,
+	.mc_callbacks	= MC_GETCAPAB | MC_SETPROP | MC_GETPROP | MC_PROPINFO,
+	.mc_getstat	= ure_m_stat,
+	.mc_start	= ure_m_start,
+	.mc_stop	= ure_m_stop,
+	.mc_setpromisc	= ure_m_promisc,
+	.mc_multicst	= ure_m_multicst,
+	.mc_unicst	= ure_m_unicst,
+	.mc_tx		= ure_m_tx,
+	.mc_getcapab	= ure_m_getcapab,
+	.mc_setprop	= ure_m_setprop,
+	.mc_getprop	= ure_m_getprop,
+	.mc_propinfo	= ure_m_propinfo,
 };
 
 DDI_DEFINE_STREAM_OPS(
@@ -281,14 +277,14 @@ DDI_DEFINE_STREAM_OPS(
 );
 
 static struct modldrv ure_modldrv = {
-	&mod_driverops,
-	"RTL815[2367] USB Ethernet",
-	&ure_dev_ops,
+	.drv_modops	= &mod_driverops,
+	.drv_linkinfo	= "RTL815[2367] USB Ethernet",
+	.drv_dev_ops	= &ure_dev_ops,
 };
 
 static struct modlinkage ure_modlinkage = {
-	MODREV_1,
-	{ &ure_modldrv, NULL }
+	.ml_rev		= MODREV_1,
+	.ml_linkage	= { &ure_modldrv, NULL }
 };
 
 int
