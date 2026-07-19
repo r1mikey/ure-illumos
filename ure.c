@@ -239,65 +239,6 @@ ure_dev_speed(ure_softc_t *sc)
 	return (ud->usb_port_status);
 }
 
-#if 0
-/*
- * Device ID table.  Covers all known RTL8152/8153/8156/8157 USB NICs.
- * Ported from OpenBSD if_ure.c device table.
- */
-static const struct {
-	uint16_t	vid;
-	uint16_t	pid;
-} ure_devs[] = {
-	{ 0x0b95, 0x8156 },	/* ASUS RTL8156 */
-	{ 0x050d, 0x0128 },	/* Belkin RTL8152B */
-	{ 0x050d, 0x0129 },	/* Belkin RTL8153 */
-	{ 0x13b1, 0x0041 },	/* Cisco Linksys USB3GIGV1 */
-	{ 0x04b4, 0x3610 },	/* Clevo RTL8153B */
-	{ 0x2001, 0xb301 },	/* D-Link RTL8153 (1) */
-	{ 0x2001, 0xb328 },	/* D-Link RTL8153 (2) */
-	{ 0x056e, 0x4010 },	/* Elecom RTL8153B */
-	{ 0x056e, 0x401a },	/* Elecom RTL8156B */
-	{ 0x17ef, 0x304f },	/* Lenovo Dock Ethernet */
-	{ 0x17ef, 0x3054 },	/* Lenovo OneLink */
-	{ 0x17ef, 0x3057 },	/* Lenovo OneLinkPlus */
-	{ 0x17ef, 0x3062 },	/* Lenovo OneLinkPro */
-	{ 0x17ef, 0x3069 },	/* Lenovo RTL8153 (1) */
-	{ 0x17ef, 0x7205 },	/* Lenovo RTL8153 (2) */
-	{ 0x17ef, 0x720a },	/* Lenovo RTL8153 (3) */
-	{ 0x17ef, 0x720c },	/* Lenovo Tablet Dock */
-	{ 0x17ef, 0x3082 },	/* Lenovo TB3 Dock */
-	{ 0x17ef, 0x3098 },	/* Lenovo TB3 Dock Gen2 */
-	{ 0x17ef, 0xa359 },	/* Lenovo TB3 GFX Dock */
-	{ 0x17ef, 0xa387 },	/* Lenovo USB-C Dock Gen2 */
-	{ 0x17ef, 0x3049 },	/* Lenovo WiGig Dock */
-	{ 0x043e, 0x3068 },	/* LG RTL8153 */
-	{ 0x043e, 0x3091 },	/* LG RTL8153B */
-	{ 0x045e, 0x07ab },	/* Microsoft Dock Ethernet */
-	{ 0x045e, 0x07c6 },	/* Microsoft Dock Ethernet 2 */
-	{ 0x045e, 0x0927 },	/* Microsoft Surface Ethernet */
-	{ 0x045e, 0x0c30 },	/* Microsoft Win Dev Ethernet */
-	{ 0x0955, 0x09ff },	/* Nvidia Tegra Ethernet */
-	{ 0x2b04, 0x0132 },	/* Pioneer DJ RTL8152B */
-	{ 0x2b04, 0x013b },	/* Pioneer DJ RTL8153B */
-	{ 0x0bda, 0x8050 },	/* Realtek RTL8152 */
-	{ 0x0bda, 0x8152 },	/* Realtek RTL8152B */
-	{ 0x0bda, 0x8153 },	/* Realtek RTL8153 */
-	{ 0x0bda, 0x8156 },	/* Realtek RTL8156 */
-	{ 0x0bda, 0x8157 },	/* Realtek RTL8157 */
-	{ 0x04e8, 0xa101 },	/* Samsung RTL8153 */
-	{ 0x0930, 0x0a13 },	/* Toshiba RTL8153B */
-	{ 0x2357, 0x0601 },	/* TP-Link EU300 */
-	{ 0x2357, 0x0602 },	/* TP-Link RTL8152B (1) */
-	{ 0x2357, 0x0603 },	/* TP-Link RTL8152B (2) */
-	{ 0x20f4, 0xe05a },	/* TRENDnet RTL8156 */
-	{ 0x0fce, 0x7a03 },	/* TTL RTL8153 */
-	{ 0x14cd, 0x8158 },	/* Twinhead RTL8153B */
-	{ 0x2717, 0xff40 },	/* Xiaomi RTL8152B */
-};
-
-#define	URE_NDEVS	(sizeof (ure_devs) / sizeof (ure_devs[0]))
-#endif
-
 /* USB event callbacks */
 static usb_event_t ure_events = {
 	.disconnect_event_handler = ure_disconnect_cb,
