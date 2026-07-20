@@ -3341,8 +3341,10 @@ ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
 			return (B_FALSE);
 		}
 
-		opts1 |= (l4off & URE_TXPKT_GTTCPHO_MAX) <<
-		    URE_TXPKT_GTTCPHO_SHIFT;
+		if (l4off > URE_TXPKT_GTTCPHO_MAX) {
+			return (B_FALSE);
+		}
+		opts1 |= l4off << URE_TXPKT_GTTCPHO_SHIFT;
 		opts2 = MIN(mss_val, URE_TXPKT_MSS_MAX) <<
 		    URE_TXPKT_MSS_SHIFT;
 	} else {
@@ -3358,32 +3360,35 @@ ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
 		if (hck_flags & HCK_PARTIALCKSUM) {
 			mac_ether_offload_info(mp, &meoi);
 
-			if ((meoi.meoi_flags & MEOI_L2INFO_SET) &&
+			if (!((meoi.meoi_flags & MEOI_L2INFO_SET) &&
 			    (meoi.meoi_flags & MEOI_L3INFO_SET) &&
-			    (meoi.meoi_flags & MEOI_L4INFO_SET)) {
-				uint32_t l4off = meoi.meoi_l2hlen +
-				    meoi.meoi_l3hlen;
-
-				if (meoi.meoi_l3proto ==
-				    ETHERTYPE_IP) {
-					opts2 |= URE_TXPKT_IPV4;
-				} else if (meoi.meoi_l3proto ==
-				    ETHERTYPE_IPV6) {
-					opts2 |= URE_TXPKT_IPV6;
-				}
-
-				if (meoi.meoi_l4proto ==
-				    IPPROTO_TCP) {
-					opts2 |= URE_TXPKT_TCP;
-				} else if (meoi.meoi_l4proto ==
-				    IPPROTO_UDP) {
-					opts2 |= URE_TXPKT_UDP;
-				}
-
-				opts2 |= (l4off &
-				    URE_TXPKT_L4_OFFSET_MAX) <<
-				    URE_TXPKT_L4_OFFSET_SHIFT;
+			    (meoi.meoi_flags & MEOI_L4INFO_SET))) {
+				return (B_FALSE);
 			}
+
+			uint32_t l4off = meoi.meoi_l2hlen +
+			    meoi.meoi_l3hlen;
+
+			if (l4off > URE_TXPKT_L4_OFFSET_MAX) {
+				return (B_FALSE);
+			}
+
+			if (meoi.meoi_l3proto == ETHERTYPE_IP) {
+				opts2 |= URE_TXPKT_IPV4;
+			} else if (meoi.meoi_l3proto ==
+			    ETHERTYPE_IPV6) {
+				opts2 |= URE_TXPKT_IPV6;
+			}
+
+			if (meoi.meoi_l4proto == IPPROTO_TCP) {
+				opts2 |= URE_TXPKT_TCP;
+			} else if (meoi.meoi_l4proto ==
+			    IPPROTO_UDP) {
+				opts2 |= URE_TXPKT_UDP;
+			}
+
+			opts2 |= l4off <<
+			    URE_TXPKT_L4_OFFSET_SHIFT;
 		}
 	}
 
