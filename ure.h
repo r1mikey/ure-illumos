@@ -167,9 +167,10 @@ typedef struct ure_tx_chain {
  *                 Brief hold; never held simultaneously with ure_lock.
  *
  * RX aggregation buffer parsing and mac_rx() upcalls run inline in
- * the USBA bulk-IN callback.  This guarantees that usb_pipe_reset
- * with USB_FLAGS_SLEEP drains all RX processing, satisfying MAC
- * rule R17 without requiring a separate drain step.
+ * the USBA bulk-IN callback.  usb_pipe_reset with USB_FLAGS_SLEEP
+ * drains all in-flight transfers and their callbacks, so once the
+ * pipe reset returns no further mac_rx() calls can occur.  This
+ * satisfies MAC rule R17 without requiring a separate drain step.
  */
 typedef struct ure_softc {
 	dev_info_t		*ure_dip;

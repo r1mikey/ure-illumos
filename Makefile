@@ -8,8 +8,8 @@
 #   make install		Copy module and conf to /kernel/drv/$(KARCH)/
 #   make uninstall		Remove module and conf from /kernel/drv/$(KARCH)/
 #
-# The driver is built for aarch64 by default.  Override KARCH for
-# other architectures (e.g., KARCH=amd64).
+# The driver is built for amd64 by default.  Override KARCH for
+# other architectures (e.g., KARCH=aarch64).
 #
 # Prerequisites:
 #   - illumos kernel headers in /usr/include (from system-header package)

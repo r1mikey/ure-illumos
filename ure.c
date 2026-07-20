@@ -2825,8 +2825,10 @@ ure_rx_start(ure_softc_t *sc)
  * chain to mac_rx().  This simplifies the stop path: since all RX
  * processing happens inside the USBA callback, usb_pipe_reset with
  * USB_FLAGS_SLEEP drains both in-flight USB transfers and their
- * callbacks, guaranteeing no mac_rx() call can occur after mc_stop
- * returns (MAC rule R17).
+ * callbacks.  Once the pipe reset returns, no further callbacks can
+ * fire, so no mac_rx() call can occur after mc_stop returns (MAC
+ * rule R17).  The ure_running/ure_gone checks inside this callback
+ * are an optimisation for the common case, not the R17 guarantee.
  */
 static void
 ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
@@ -3754,10 +3756,8 @@ ure_m_stop(void *arg)
 	 * Drain pipes.  usb_pipe_reset(USB_FLAGS_SLEEP) waits for
 	 * all in-flight transfers to complete and their callbacks
 	 * to return before it returns.  Because RX packet processing
-	 * runs inline in the callback, this also guarantees that all
-	 * mac_rx() upcalls have completed (MAC rule R17).  The
-	 * callbacks will see !ure_running under ure_lock and skip
-	 * mac_tx_update.
+	 * runs inline in the callback, this guarantees that all
+	 * mac_rx() upcalls have completed (MAC rule R17).
 	 */
 	usb_pipe_reset(sc->ure_dip, sc->ure_bulkin_pipe,
 	    USB_FLAGS_SLEEP, NULL, 0);
