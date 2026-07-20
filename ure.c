@@ -303,8 +303,9 @@ _init(void)
 	int err;
 
 	if ((err = ddi_soft_state_init(&ure_statep,
-	    sizeof (ure_softc_t), 1)) != 0)
+	    sizeof (ure_softc_t), 1)) != 0) {
 		return (err);
+	}
 
 	if ((major = ddi_name_to_major("ure")) == DDI_MAJOR_T_NONE) {
 		ddi_soft_state_fini(&ure_statep);
@@ -326,8 +327,9 @@ _fini(void)
 {
 	int err;
 
-	if ((err = mod_remove(&ure_modlinkage)) != 0)
+	if ((err = mod_remove(&ure_modlinkage)) != 0) {
 		return (err);
+	}
 
 	mac_fini_ops(&ure_dev_ops);
 	ddi_soft_state_fini(&ure_statep);
@@ -357,16 +359,19 @@ ure_ctl(ure_softc_t *sc, uint8_t rw, uint16_t val, uint16_t index,
 	mblk_t *data = NULL;
 	int ret;
 
-	if (sc->ure_gone)
+	if (sc->ure_gone) {
 		return (USB_FAILURE);
+	}
 
 	bzero(&setup, sizeof (setup));
-	if (rw == URE_CTL_WRITE)
+	if (rw == URE_CTL_WRITE) {
 		setup.bmRequestType = USB_DEV_REQ_HOST_TO_DEV |
 		    USB_DEV_REQ_TYPE_VENDOR | USB_DEV_REQ_RCPT_DEV;
-	else
+	}
+	else {
 		setup.bmRequestType = USB_DEV_REQ_DEV_TO_HOST |
 		    USB_DEV_REQ_TYPE_VENDOR | USB_DEV_REQ_RCPT_DEV;
+	}
 	setup.bRequest = USB_REQ_SET_ADDRESS;
 	setup.wValue = val;
 	setup.wIndex = index;
@@ -375,8 +380,9 @@ ure_ctl(ure_softc_t *sc, uint8_t rw, uint16_t val, uint16_t index,
 
 	if (rw == URE_CTL_WRITE && buf != NULL && len > 0) {
 		data = allocb(len, BPRI_MED);
-		if (data == NULL)
+		if (data == NULL) {
 			return (USB_FAILURE);
+		}
 		bcopy(buf, data->b_wptr, len);
 		data->b_wptr += len;
 	}
@@ -388,13 +394,15 @@ ure_ctl(ure_softc_t *sc, uint8_t rw, uint16_t val, uint16_t index,
 	if (ret == USB_SUCCESS && rw == URE_CTL_READ &&
 	    data != NULL && buf != NULL) {
 		int actual = MBLKL(data);
-		if (actual > len)
+		if (actual > len) {
 			actual = len;
+		}
 		bcopy(data->b_rptr, buf, actual);
 	}
 
-	if (data != NULL)
+	if (data != NULL) {
 		freemsg(data);
+	}
 
 	return (ret);
 }
@@ -2583,8 +2591,9 @@ ure_rx_start(ure_softc_t *sc)
 	while (sc->ure_rx_cnt < URE_RX_LIST_CNT) {
 		usb_bulk_req_t *req;
 
-		if (sc->ure_gone || !sc->ure_running)
+		if (sc->ure_gone || !sc->ure_running) {
 			return;
+		}
 
 		req = usb_alloc_bulk_req(sc->ure_dip,
 		    sc->ure_rxbufsz, USB_FLAGS_NOSLEEP);
@@ -2644,8 +2653,9 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 	mutex_exit(&sc->ure_lock);
 
 	if (req->bulk_completion_reason != USB_CR_OK) {
-		if (req->bulk_completion_reason != USB_CR_STOPPED_POLLING)
+		if (req->bulk_completion_reason != USB_CR_STOPPED_POLLING) {
 			atomic_add_64(&sc->ure_stat_ierrors, 1);
+		}
 		goto resubmit;
 	}
 
@@ -2733,30 +2743,35 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 
 			if (sc->ure_flags & URE_FLAG_8157) {
 				if ((rxcsum & URE_RXPKT_V2_IPV4) &&
-				    !(rxcsum & URE_RXPKT_V2_IPSUMBAD))
+				    !(rxcsum & URE_RXPKT_V2_IPSUMBAD)) {
 					hck_flags |= HCK_IPV4_HDRCKSUM_OK;
+				}
 				if ((rxcsum & (URE_RXPKT_V2_IPV4 |
 				    URE_RXPKT_V2_IPV6)) &&
 				    (((rxcsum & URE_RXPKT_V2_TCP) &&
 				    !(rxcsum & URE_RXPKT_V2_TCPSUMBAD)) ||
 				    ((rxcsum & URE_RXPKT_V2_UDP) &&
-				    !(rxcsum & URE_RXPKT_V2_UDPSUMBAD))))
+				    !(rxcsum & URE_RXPKT_V2_UDPSUMBAD)))) {
 					hck_flags |= HCK_FULLCKSUM_OK;
+				}
 			} else {
 				if ((rxvlan & URE_RXPKT_IPV4) &&
-				    !(rxcsum & URE_RXPKT_IPSUMBAD))
+				    !(rxcsum & URE_RXPKT_IPSUMBAD)) {
 					hck_flags |= HCK_IPV4_HDRCKSUM_OK;
+				}
 				if ((rxvlan & (URE_RXPKT_IPV4 |
 				    URE_RXPKT_IPV6)) &&
 				    (((rxvlan & URE_RXPKT_TCP) &&
 				    !(rxcsum & URE_RXPKT_TCPSUMBAD)) ||
 				    ((rxvlan & URE_RXPKT_UDP) &&
-				    !(rxcsum & URE_RXPKT_UDPSUMBAD))))
+				    !(rxcsum & URE_RXPKT_UDPSUMBAD)))) {
 					hck_flags |= HCK_FULLCKSUM_OK;
+				}
 			}
 
-			if (hck_flags != 0)
+			if (hck_flags != 0) {
 				mac_hcksum_set(mp, 0, 0, 0, 0, hck_flags);
+			}
 
 			if (ure_rxcsum_debug > 0) {
 				ure_rxcsum_debug--;
@@ -2780,27 +2795,32 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 			/* Multicast/broadcast RX stats */
 			if (mp->b_rptr[0] & 0x01) {
 				if (bcmp(mp->b_rptr, ure_bcast_addr,
-				    ETHERADDRL) == 0)
+				    ETHERADDRL) == 0) {
 					atomic_add_64(
 					    &sc->ure_stat_brdcstrcv, 1);
-				else
+				}
+				else {
 					atomic_add_64(
 					    &sc->ure_stat_multircv, 1);
+				}
 			}
 
 			uint32_t consumed = P2ROUNDUP(pktlen, align);
-			if (consumed > total_len)
+			if (consumed > total_len) {
 				break;
+			}
 			off += consumed;
 			total_len -= consumed;
 		}
 
 		/* Pass received chain to MAC */
 		if (head != NULL) {
-			if (sc->ure_running && !sc->ure_gone)
+			if (sc->ure_running && !sc->ure_gone) {
 				mac_rx(sc->ure_mh, NULL, head);
-			else
+			}
+			else {
 				freemsgchain(head);
+			}
 		}
 	}
 
@@ -2812,14 +2832,16 @@ resubmit:
 		req->bulk_data = NULL;
 	}
 	usb_free_bulk_req(req);
-	if (data != NULL)
+	if (data != NULL) {
 		freemsg(data);
+	}
 
 	mutex_enter(&sc->ure_lock);
 	ASSERT(sc->ure_rx_cnt > 0);
 	sc->ure_rx_cnt--;
-	if (sc->ure_running && !sc->ure_gone)
+	if (sc->ure_running && !sc->ure_gone) {
 		ure_rx_start(sc);
+	}
 	mutex_exit(&sc->ure_lock);
 }
 /*
@@ -3568,10 +3590,12 @@ ure_mcast_hash_bit(const uint8_t *addr)
 	for (i = 0; i < ETHERADDRL; i++) {
 		uint8_t c = addr[i];
 		for (j = 0; j < 8; j++) {
-			if (((crc >> 31) ^ (c & 1)) != 0)
+			if (((crc >> 31) ^ (c & 1)) != 0) {
 				crc = (crc << 1) ^ 0x04c11db7;
-			else
+			}
+			else {
 				crc <<= 1;
+			}
 			c >>= 1;
 		}
 	}
@@ -3596,10 +3620,12 @@ ure_mcast_hash_rebuild(ure_softc_t *sc)
 	for (me = list_head(&sc->ure_mcast_list); me != NULL;
 	    me = list_next(&sc->ure_mcast_list, me)) {
 		bit = ure_mcast_hash_bit(me->addr);
-		if (bit < 32)
+		if (bit < 32) {
 			sc->ure_mcast_hash[0] |= (1U << bit);
-		else
+		}
+		else {
 			sc->ure_mcast_hash[1] |= (1U << (bit - 32));
+		}
 	}
 }
 
@@ -3825,8 +3851,9 @@ ure_tx_chain_construct(void *buf, void *arg, int kmflags)
 	chain->uc_bufmax = sc->ure_txbufsz;
 	chain->uc_buf = allocb(chain->uc_bufmax,
 	    (kmflags == KM_SLEEP) ? BPRI_LO : BPRI_MED);
-	if (chain->uc_buf == NULL)
+	if (chain->uc_buf == NULL) {
 		return (-1);
+	}
 	chain->uc_npkts = 0;
 	chain->uc_nbytes = 0;
 
@@ -3927,8 +3954,9 @@ ure_disconnect_cb(dev_info_t *dip)
 	int instance = ddi_get_instance(dip);
 
 	sc = ddi_get_soft_state(ure_statep, instance);
-	if (sc == NULL)
+	if (sc == NULL) {
 		return (DDI_SUCCESS);
+	}
 
 	mutex_enter(&sc->ure_lock);
 	sc->ure_was_running = sc->ure_running;	/* save BEFORE clearing */
@@ -3953,8 +3981,9 @@ ure_reconnect_cb(dev_info_t *dip)
 	boolean_t was_running;
 
 	sc = ddi_get_soft_state(ure_statep, instance);
-	if (sc == NULL)
+	if (sc == NULL) {
 		return (DDI_SUCCESS);
+	}
 
 	mutex_enter(&sc->ure_lock);
 	sc->ure_gone = B_FALSE;
@@ -4214,8 +4243,9 @@ ure_cleanup(ure_softc_t *sc)
 	/* Free multicast address list */
 	{
 		ure_mcast_entry_t *me;
-		while ((me = list_remove_head(&sc->ure_mcast_list)) != NULL)
+		while ((me = list_remove_head(&sc->ure_mcast_list)) != NULL) {
 			kmem_free(me, sizeof (*me));
+		}
 		list_destroy(&sc->ure_mcast_list);
 	}
 
@@ -4254,8 +4284,9 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		break;
 	case DDI_RESUME:
 		sc = ddi_get_soft_state(ure_statep, instance);
-		if (sc == NULL)
+		if (sc == NULL) {
 			return (DDI_FAILURE);
+		}
 
 		mutex_enter(&sc->ure_lock);
 		sc->ure_gone = B_FALSE;
@@ -4310,8 +4341,9 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	}
 
 	if (ddi_soft_state_zalloc(ure_statep, instance) !=
-	    DDI_SUCCESS)
+	    DDI_SUCCESS) {
 		return (DDI_FAILURE);
+	}
 
 	sc = ddi_get_soft_state(ure_statep, instance);
 	sc->ure_dip = dip;
@@ -4413,12 +4445,14 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	/* Step 6: Read MAC address */
 	if (sc->ure_chip & (URE_CHIP_VER_4C00 |
-	    URE_CHIP_VER_4C10))
+	    URE_CHIP_VER_4C10)) {
 		ure_read_mem(sc, URE_PLA_IDR, URE_MCU_TYPE_PLA,
 		    eaddr, sizeof (eaddr));
-	else
+	}
+	else {
 		ure_read_mem(sc, URE_PLA_BACKUP,
 		    URE_MCU_TYPE_PLA, eaddr, sizeof (eaddr));
+	}
 
 	bcopy(eaddr, sc->ure_dev_addr, ETHERADDRL);
 
@@ -4429,8 +4463,9 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	    sc->ure_dev_addr[4], sc->ure_dev_addr[5]);
 
 	/* Step 7: Open bulk pipes */
-	if (ure_open_pipes(sc) != DDI_SUCCESS)
+	if (ure_open_pipes(sc) != DDI_SUCCESS) {
 		goto fail;
+	}
 
 	/* Step 8: Register USB event callbacks */
 	ret = usb_register_event_cbs(dip, &ure_events, 0);
@@ -4488,8 +4523,9 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	return (DDI_SUCCESS);
 
 fail:
-	if (macp != NULL)
+	if (macp != NULL) {
 		mac_free(macp);
+	}
 	ure_cleanup(sc);
 	ddi_soft_state_free(ure_statep, instance);
 	return (DDI_FAILURE);
