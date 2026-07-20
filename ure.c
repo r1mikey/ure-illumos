@@ -3718,6 +3718,7 @@ ure_m_stop(void *arg)
 
 	mutex_enter(&sc->ure_lock);
 	sc->ure_running = B_FALSE;
+	sc->ure_flags &= ~URE_FLAG_LINK;
 	sc->ure_link_state = LINK_STATE_DOWN;
 	mutex_exit(&sc->ure_lock);
 
@@ -4165,6 +4166,7 @@ ure_disconnect_cb(dev_info_t *dip)
 	sc->ure_was_running = sc->ure_running;	/* save BEFORE clearing */
 	sc->ure_gone = B_TRUE;
 	sc->ure_running = B_FALSE;
+	sc->ure_flags &= ~URE_FLAG_LINK;
 	sc->ure_link_state = LINK_STATE_DOWN;
 	mutex_exit(&sc->ure_lock);
 
@@ -4257,6 +4259,7 @@ ure_chip_init(ure_softc_t *sc)
 	int err;
 
 	sc->ure_chip = 0;
+	sc->ure_flags = 0;
 
 	sc->ure_phy_read = ure_ocp_reg_read;
 	sc->ure_phy_write = ure_ocp_reg_write;
@@ -4784,6 +4787,7 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		mutex_enter(&sc->ure_lock);
 		sc->ure_was_running = sc->ure_running;
 		sc->ure_running = B_FALSE;
+		sc->ure_flags &= ~URE_FLAG_LINK;
 		sc->ure_link_state = LINK_STATE_UNKNOWN;
 		mutex_exit(&sc->ure_lock);
 
