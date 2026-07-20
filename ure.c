@@ -4166,7 +4166,9 @@ ure_disconnect_cb(dev_info_t *dip)
 	/* Discard any pending coalescing buffer */
 	ure_txc_discard(sc);
 
-	mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
+	if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
+		mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
+	}
 
 	return (DDI_SUCCESS);
 }
@@ -4426,14 +4428,14 @@ ure_cleanup(ure_softc_t *sc)
 		sc->ure_attach_seq &= ~URE_ATTACH_LINK_TIMER;
 	}
 
-	if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
-		(void) mac_unregister(sc->ure_mh);
-		sc->ure_attach_seq &= ~URE_ATTACH_MAC_REG;
-	}
-
 	if (sc->ure_attach_seq & URE_ATTACH_USB_EVT) {
 		usb_unregister_event_cbs(sc->ure_dip, &ure_events);
 		sc->ure_attach_seq &= ~URE_ATTACH_USB_EVT;
+	}
+
+	if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
+		(void) mac_unregister(sc->ure_mh);
+		sc->ure_attach_seq &= ~URE_ATTACH_MAC_REG;
 	}
 
 	ure_close_pipes(sc);
@@ -4685,16 +4687,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		goto fail;
 	}
 
-	/* Step 8: Register USB event callbacks */
-	ret = usb_register_event_cbs(dip, &ure_events, 0);
-	if (ret != USB_SUCCESS) {
-		dev_err(dip, CE_WARN,
-		    "usb_register_event_cbs failed: %d", ret);
-		goto fail;
-	}
-	sc->ure_attach_seq |= URE_ATTACH_USB_EVT;
-
-	/* Step 9: Register with MAC framework */
+	/* Step 8: Register with MAC framework */
 	macp = mac_alloc(MAC_VERSION);
 	if (macp == NULL) {
 		dev_err(dip, CE_WARN, "mac_alloc failed");
@@ -4721,6 +4714,15 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		goto fail;
 	}
 	sc->ure_attach_seq |= URE_ATTACH_MAC_REG;
+
+	/* Step 9: Register USB event callbacks */
+	ret = usb_register_event_cbs(dip, &ure_events, 0);
+	if (ret != USB_SUCCESS) {
+		dev_err(dip, CE_WARN,
+		    "usb_register_event_cbs failed: %d", ret);
+		goto fail;
+	}
+	sc->ure_attach_seq |= URE_ATTACH_USB_EVT;
 
 	/*
 	 * Report an initial link-down so that the first link-up from
