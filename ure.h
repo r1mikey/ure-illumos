@@ -210,9 +210,9 @@ typedef struct ure_softc {
 	boolean_t		ure_lso_en;	/* LSO/TSO offload */
 
 	/* PHY access function pointers (per chip variant) */
-	uint16_t		(*ure_phy_read)(struct ure_softc *,
-				    uint16_t);
-	void			(*ure_phy_write)(struct ure_softc *,
+	int			(*ure_phy_read)(struct ure_softc *,
+				    uint16_t, uint16_t *);
+	int			(*ure_phy_write)(struct ure_softc *,
 				    uint16_t, uint16_t);
 
 	/* MAC address */
@@ -260,28 +260,7 @@ typedef struct ure_softc {
 
 } ure_softc_t;
 
-/*
- * Convenience macros for read-modify-write register operations.
- */
-#define	URE_SETBIT_1(sc, reg, idx, x)	\
-	ure_write_1((sc), (reg), (idx), \
-	    ure_read_1((sc), (reg), (idx)) | (x))
-#define	URE_SETBIT_2(sc, reg, idx, x)	\
-	ure_write_2((sc), (reg), (idx), \
-	    ure_read_2((sc), (reg), (idx)) | (x))
-#define	URE_SETBIT_4(sc, reg, idx, x)	\
-	ure_write_4((sc), (reg), (idx), \
-	    ure_read_4((sc), (reg), (idx)) | (x))
 
-#define	URE_CLRBIT_1(sc, reg, idx, x)	\
-	ure_write_1((sc), (reg), (idx), \
-	    ure_read_1((sc), (reg), (idx)) & ~(x))
-#define	URE_CLRBIT_2(sc, reg, idx, x)	\
-	ure_write_2((sc), (reg), (idx), \
-	    ure_read_2((sc), (reg), (idx)) & ~(x))
-#define	URE_CLRBIT_4(sc, reg, idx, x)	\
-	ure_write_4((sc), (reg), (idx), \
-	    ure_read_4((sc), (reg), (idx)) & ~(x))
 
 
 #ifdef __cplusplus
