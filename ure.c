@@ -2953,7 +2953,7 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 				}
 			}
 
-			if (hck_flags != 0) {
+			if (hck_flags != 0 && sc->ure_hcksum_en) {
 				mac_hcksum_set(mp, 0, 0, 0, 0, hck_flags);
 			}
 
