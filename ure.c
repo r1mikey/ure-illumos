@@ -4202,6 +4202,9 @@ ure_reconnect_cb(dev_info_t *dip)
 	if (ure_chip_init(sc) != 0) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "chip init failed on reconnect");
+		mutex_enter(&sc->ure_lock);
+		sc->ure_gone = B_TRUE;
+		mutex_exit(&sc->ure_lock);
 		return (DDI_SUCCESS);
 	}
 
@@ -4212,7 +4215,7 @@ ure_reconnect_cb(dev_info_t *dip)
 		if (ure_phy_powerup(sc) != 0) {
 			dev_err(sc->ure_dip, CE_WARN,
 			    "PHY powerup failed on reconnect");
-			return (DDI_SUCCESS);
+			goto reconn_fail;
 		}
 
 		mutex_enter(&sc->ure_lock);
@@ -4228,11 +4231,16 @@ ure_reconnect_cb(dev_info_t *dip)
 			mutex_exit(&sc->ure_lock);
 			dev_err(sc->ure_dip, CE_WARN,
 			    "NIC reset failed on reconnect");
-			return (DDI_SUCCESS);
+			goto reconn_fail;
 		}
 
 		/* Setup MAC, TX/RX, filters */
-		(void) ure_ifmedia_init(sc);
+		if (ure_ifmedia_init(sc) != 0) {
+			mutex_exit(&sc->ure_lock);
+			dev_err(sc->ure_dip, CE_WARN,
+			    "media init failed on reconnect");
+			goto reconn_fail;
+		}
 		ure_set_rx_filter(sc);
 
 		sc->ure_running = B_TRUE;
@@ -4245,6 +4253,15 @@ ure_reconnect_cb(dev_info_t *dip)
 		mac_link_update(sc->ure_mh, LINK_STATE_UNKNOWN);
 	}
 
+	return (DDI_SUCCESS);
+
+reconn_fail:
+	mutex_enter(&sc->ure_lock);
+	sc->ure_gone = B_TRUE;
+	mutex_exit(&sc->ure_lock);
+	if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
+		mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
+	}
 	return (DDI_SUCCESS);
 }
 
@@ -4514,7 +4531,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		if (ure_chip_init(sc) != 0) {
 			dev_err(dip, CE_WARN,
 			    "chip init failed on resume");
-			return (DDI_SUCCESS);
+			return (DDI_FAILURE);
 		}
 
 		if (was_running) {
@@ -4524,7 +4541,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			if (ure_phy_powerup(sc) != 0) {
 				dev_err(dip, CE_WARN,
 				    "PHY powerup failed on resume");
-				return (DDI_SUCCESS);
+				return (DDI_FAILURE);
 			}
 
 			mutex_enter(&sc->ure_lock);
@@ -4540,11 +4557,16 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 				mutex_exit(&sc->ure_lock);
 				dev_err(dip, CE_WARN,
 				    "NIC reset failed on resume");
-				return (DDI_SUCCESS);
+				return (DDI_FAILURE);
 			}
 
 			/* Restore MAC, TX/RX config, filters */
-			(void) ure_ifmedia_init(sc);
+			if (ure_ifmedia_init(sc) != 0) {
+				mutex_exit(&sc->ure_lock);
+				dev_err(dip, CE_WARN,
+				    "media init failed on resume");
+				return (DDI_FAILURE);
+			}
 			ure_set_rx_filter(sc);
 
 			sc->ure_running = B_TRUE;
