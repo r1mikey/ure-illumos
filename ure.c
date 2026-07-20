@@ -187,7 +187,7 @@ static int	ure_reset(ure_softc_t *);
 static int	ure_phy_powerdown(ure_softc_t *);
 static int	ure_phy_powerup(ure_softc_t *);
 static int	ure_rxvlan(ure_softc_t *);
-static void	ure_set_rx_filter(ure_softc_t *);
+static int	ure_set_rx_filter(ure_softc_t *);
 static int	ure_ifmedia_init(ure_softc_t *);
 static int	ure_get_link_status(ure_softc_t *, int *);
 static void	ure_link_check(void *);
@@ -2719,7 +2719,7 @@ ure_link_check(void *arg)
  * RX filter (multicast hash, promisc)
  */
 
-static void
+static int
 ure_set_rx_filter(ure_softc_t *sc)
 {
 	uint32_t rxmode;
@@ -2729,7 +2729,7 @@ ure_set_rx_filter(ure_softc_t *sc)
 
 	if (ure_read_4(sc, URE_PLA_RCR, URE_MCU_TYPE_PLA, &rxmode) !=
 	    USB_SUCCESS) {
-		return;
+		return (EIO);
 	}
 	rxmode &= ~URE_RCR_ACPT_ALL;
 
@@ -2755,12 +2755,14 @@ ure_set_rx_filter(ure_softc_t *sc)
 	if (ure_write_mem(sc, URE_PLA_MAR,
 	    URE_MCU_TYPE_PLA | URE_BYTE_EN_DWORD,
 	    hashes, sizeof (hashes)) != USB_SUCCESS) {
-		return;
+		return (EIO);
 	}
 	if (ure_write_4(sc, URE_PLA_RCR, URE_MCU_TYPE_PLA, rxmode) !=
 	    USB_SUCCESS) {
-		return;
+		return (EIO);
 	}
+
+	return (0);
 }
 
 /*
@@ -3699,7 +3701,10 @@ ure_m_start(void *arg)
 		mutex_exit(&sc->ure_lock);
 		return (EIO);
 	}
-	ure_set_rx_filter(sc);
+	if (ure_set_rx_filter(sc) != 0) {
+		mutex_exit(&sc->ure_lock);
+		return (EIO);
+	}
 
 	sc->ure_running = B_TRUE;
 
@@ -3770,7 +3775,10 @@ ure_m_promisc(void *arg, boolean_t on)
 	mutex_enter(&sc->ure_lock);
 	sc->ure_promisc = on;
 	if (sc->ure_running) {
-		ure_set_rx_filter(sc);
+		if (ure_set_rx_filter(sc) != 0) {
+			mutex_exit(&sc->ure_lock);
+			return (EIO);
+		}
 	}
 	mutex_exit(&sc->ure_lock);
 
@@ -3861,7 +3869,10 @@ ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 	}
 	ure_mcast_hash_rebuild(sc);
 	if (sc->ure_running) {
-		ure_set_rx_filter(sc);
+		if (ure_set_rx_filter(sc) != 0) {
+			mutex_exit(&sc->ure_lock);
+			return (EIO);
+		}
 	}
 	mutex_exit(&sc->ure_lock);
 
@@ -3872,23 +3883,26 @@ static int
 ure_m_unicst(void *arg, const uint8_t *macaddr)
 {
 	ure_softc_t *sc = (ure_softc_t *)arg;
+	int err = 0;
 
 	mutex_enter(&sc->ure_lock);
 	bcopy(macaddr, sc->ure_dev_addr, ETHERADDRL);
 	if (sc->ure_running) {
 		uint8_t addr[8] = {0};
 		bcopy(sc->ure_dev_addr, addr, ETHERADDRL);
-		ure_write_1(sc, URE_PLA_CRWECR,
-		    URE_MCU_TYPE_PLA, URE_CRWECR_CONFIG);
-		ure_write_mem(sc, URE_PLA_IDR,
+		if (ure_write_1(sc, URE_PLA_CRWECR,
+		    URE_MCU_TYPE_PLA, URE_CRWECR_CONFIG) != USB_SUCCESS ||
+		    ure_write_mem(sc, URE_PLA_IDR,
 		    URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
-		    addr, sizeof (addr));
-		ure_write_1(sc, URE_PLA_CRWECR,
-		    URE_MCU_TYPE_PLA, URE_CRWECR_NORMAL);
+		    addr, sizeof (addr)) != USB_SUCCESS ||
+		    ure_write_1(sc, URE_PLA_CRWECR,
+		    URE_MCU_TYPE_PLA, URE_CRWECR_NORMAL) != USB_SUCCESS) {
+			err = EIO;
+		}
 	}
 	mutex_exit(&sc->ure_lock);
 
-	return (0);
+	return (err);
 }
 
 static int
@@ -4241,7 +4255,12 @@ ure_reconnect_cb(dev_info_t *dip)
 			    "media init failed on reconnect");
 			goto reconn_fail;
 		}
-		ure_set_rx_filter(sc);
+		if (ure_set_rx_filter(sc) != 0) {
+			mutex_exit(&sc->ure_lock);
+			dev_err(sc->ure_dip, CE_WARN,
+			    "RX filter setup failed on reconnect");
+			goto reconn_fail;
+		}
 
 		sc->ure_running = B_TRUE;
 
@@ -4567,7 +4586,12 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 				    "media init failed on resume");
 				return (DDI_FAILURE);
 			}
-			ure_set_rx_filter(sc);
+			if (ure_set_rx_filter(sc) != 0) {
+				mutex_exit(&sc->ure_lock);
+				dev_err(dip, CE_WARN,
+				    "RX filter setup failed on resume");
+				return (DDI_FAILURE);
+			}
 
 			sc->ure_running = B_TRUE;
 
