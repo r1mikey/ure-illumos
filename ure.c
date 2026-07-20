@@ -944,6 +944,27 @@ ure_phy_powerup(ure_softc_t *sc)
  * Chip helper functions
  */
 
+static boolean_t
+ure_has_2500fdx(ure_softc_t *sc)
+{
+	if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8157)) {
+		return (B_TRUE);
+	}
+
+	if ((sc->ure_flags & URE_FLAG_8156B) &&
+	    !(sc->ure_chip & URE_CHIP_VER_7420)) {
+		return (B_TRUE);
+	}
+
+	return (B_FALSE);
+}
+
+static boolean_t
+ure_has_5000fdx(ure_softc_t *sc)
+{
+	return ((sc->ure_flags & URE_FLAG_8157) != 0);
+}
+
 static int
 ure_disable_teredo(ure_softc_t *sc)
 {
@@ -1625,6 +1646,47 @@ ure_rtl8153b_init(ure_softc_t *sc)
 	 * device quirk mechanism, we keep U1/U2 disabled at the
 	 * device register level instead.
 	 */
+
+	if (sc->ure_flags & URE_FLAG_8156B) {
+		uint16_t tmp;
+
+		if ((err = ure_clrbit_2(sc, URE_PLA_RCR,
+		    URE_MCU_TYPE_PLA,
+		    URE_SLOT_EN)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_setbit_2(sc, URE_PLA_CPCR,
+		    URE_MCU_TYPE_PLA,
+		    URE_FLOW_CTRL_EN)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_write_2(sc, URE_USB_FC_TIMER,
+		    URE_MCU_TYPE_USB,
+		    URE_CTRL_TIMER_EN | 75)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_read_2(sc, URE_USB_FW_CTRL,
+		    URE_MCU_TYPE_USB, &reg)) != USB_SUCCESS) {
+			return (err);
+		}
+		reg &= ~URE_AUTO_SPEEDUP;
+		if ((err = ure_read_2(sc, URE_PLA_POL_GPIO_CTRL,
+		    URE_MCU_TYPE_PLA, &tmp)) != USB_SUCCESS) {
+			return (err);
+		}
+		if (!(tmp & URE_DACK_DET_EN)) {
+			reg |= URE_FLOW_CTRL_PATCH_2;
+		}
+		if ((err = ure_write_2(sc, URE_USB_FW_CTRL,
+		    URE_MCU_TYPE_USB, reg)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_setbit_2(sc, URE_USB_FW_TASK,
+		    URE_MCU_TYPE_USB,
+		    URE_FC_PATCH_TASK)) != USB_SUCCESS) {
+			return (err);
+		}
+	}
 
 	if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B)) {
 		if ((err = ure_clrbit_2(sc, URE_PLA_MAC_PWR_CTRL3,
@@ -2603,10 +2665,12 @@ ure_link_check(void *arg)
 			return;
 		}
 
-		if (status & URE_PHYSTATUS_5000MBPS) {
+		if (ure_has_5000fdx(sc) &&
+		    (status & URE_PHYSTATUS_5000MBPS)) {
 			speed = 5000000000ULL;
 			duplex = LINK_DUPLEX_FULL;
-		} else if (status & URE_PHYSTATUS_2500MBPS) {
+		} else if (ure_has_2500fdx(sc) &&
+		    (status & URE_PHYSTATUS_2500MBPS)) {
 			speed = 2500000000ULL;
 			duplex = LINK_DUPLEX_FULL;
 		} else if (status & URE_PHYSTATUS_1000MBPS) {
@@ -2627,8 +2691,7 @@ ure_link_check(void *arg)
 		 * Cache link partner 2.5G/5G ability from the
 		 * 10GBASE-T AN status register.
 		 */
-		if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B |
-		    URE_FLAG_8157)) {
+		if (ure_has_2500fdx(sc)) {
 			uint16_t ocp_val;
 
 			if (ure_ocp_reg_read(sc, URE_OCP_10GBT_STAT,
@@ -3635,23 +3698,26 @@ ure_m_stat(void *arg, uint_t stat, uint64_t *val)
 		*val = sc->ure_link_duplex;
 		break;
 	case ETHER_STAT_CAP_2500FDX:
-		*val = !!(sc->ure_flags & (URE_FLAG_8156 |
-		    URE_FLAG_8156B | URE_FLAG_8157));
+		*val = ure_has_2500fdx(sc);
 		break;
 	case ETHER_STAT_ADV_CAP_2500FDX:
-		*val = !!(sc->ure_10gbt_ctrl & URE_ADV_2500TFDX);
+		*val = ure_has_2500fdx(sc) &&
+		    !!(sc->ure_10gbt_ctrl & URE_ADV_2500TFDX);
 		break;
 	case ETHER_STAT_LP_CAP_2500FDX:
-		*val = !!(sc->ure_10gbt_stat & URE_LP_2500TFDX);
+		*val = ure_has_2500fdx(sc) &&
+		    !!(sc->ure_10gbt_stat & URE_LP_2500TFDX);
 		break;
 	case ETHER_STAT_CAP_5000FDX:
-		*val = !!(sc->ure_flags & URE_FLAG_8157);
+		*val = ure_has_5000fdx(sc);
 		break;
 	case ETHER_STAT_ADV_CAP_5000FDX:
-		*val = !!(sc->ure_10gbt_ctrl & URE_ADV_5000TFDX);
+		*val = ure_has_5000fdx(sc) &&
+		    !!(sc->ure_10gbt_ctrl & URE_ADV_5000TFDX);
 		break;
 	case ETHER_STAT_LP_CAP_5000FDX:
-		*val = !!(sc->ure_10gbt_stat & URE_LP_5000TFDX);
+		*val = ure_has_5000fdx(sc) &&
+		    !!(sc->ure_10gbt_stat & URE_LP_5000TFDX);
 		break;
 	case MAC_STAT_MULTIRCV:
 		*val = sc->ure_stat_multircv;
@@ -3932,13 +3998,20 @@ ure_m_unicst(void *arg, const uint8_t *macaddr)
 		uint8_t addr[8] = {0};
 		bcopy(sc->ure_dev_addr, addr, ETHERADDRL);
 		if (ure_write_1(sc, URE_PLA_CRWECR,
-		    URE_MCU_TYPE_PLA, URE_CRWECR_CONFIG) != USB_SUCCESS ||
-		    ure_write_mem(sc, URE_PLA_IDR,
-		    URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
-		    addr, sizeof (addr)) != USB_SUCCESS ||
-		    ure_write_1(sc, URE_PLA_CRWECR,
-		    URE_MCU_TYPE_PLA, URE_CRWECR_NORMAL) != USB_SUCCESS) {
+		    URE_MCU_TYPE_PLA,
+		    URE_CRWECR_CONFIG) != USB_SUCCESS) {
 			err = EIO;
+		} else {
+			if (ure_write_mem(sc, URE_PLA_IDR,
+			    URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
+			    addr, sizeof (addr)) != USB_SUCCESS) {
+				err = EIO;
+			}
+			if (ure_write_1(sc, URE_PLA_CRWECR,
+			    URE_MCU_TYPE_PLA,
+			    URE_CRWECR_NORMAL) != USB_SUCCESS) {
+				err = EIO;
+			}
 		}
 	}
 	mutex_exit(&sc->ure_lock);
@@ -3984,12 +4057,12 @@ ure_m_getprop(void *arg, const char *pr_name,
 		break;
 	case MAC_PROP_ADV_2500FDX_CAP:
 	case MAC_PROP_EN_2500FDX_CAP:
-		*(uint8_t *)pr_val =
+		*(uint8_t *)pr_val = ure_has_2500fdx(sc) &&
 		    !!(sc->ure_10gbt_ctrl & URE_ADV_2500TFDX);
 		break;
 	case MAC_PROP_ADV_5000FDX_CAP:
 	case MAC_PROP_EN_5000FDX_CAP:
-		*(uint8_t *)pr_val =
+		*(uint8_t *)pr_val = ure_has_5000fdx(sc) &&
 		    !!(sc->ure_10gbt_ctrl & URE_ADV_5000TFDX);
 		break;
 	default:
@@ -4463,8 +4536,7 @@ ure_chip_init(ure_softc_t *sc)
 	 * support 2.5G/5G.  This tells us what speeds the firmware
 	 * has enabled for autonegotiation advertisement.
 	 */
-	if (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B |
-	    URE_FLAG_8157)) {
+	if (ure_has_2500fdx(sc)) {
 		if ((err = ure_ocp_reg_read(sc, URE_OCP_10GBT_CTRL,
 		    &sc->ure_10gbt_ctrl)) != USB_SUCCESS) {
 			return (err);
