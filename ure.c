@@ -1307,10 +1307,7 @@ ure_rtl8153_init(ure_softc_t *sc)
 		}
 	}
 
-	if ((err = ure_rtl8153_phy_status(sc,
-	    URE_PHY_STAT_LAN_ON, &reg)) != 0) {
-		return (err);
-	}
+	(void) ure_rtl8153_phy_status(sc, URE_PHY_STAT_LAN_ON, &reg);
 
 	if ((err = ure_clrbit_2(sc, URE_USB_U2P3_CTRL,
 	    URE_MCU_TYPE_USB, URE_U2P3_ENABLE)) != USB_SUCCESS) {
@@ -1514,10 +1511,7 @@ ure_rtl8153b_init(ure_softc_t *sc)
 	    &reg)) != 0) {
 		return (err);
 	}
-	if ((err = ure_rtl8153_phy_status(sc,
-	    URE_PHY_STAT_LAN_ON, &reg)) != 0) {
-		return (err);
-	}
+	(void) ure_rtl8153_phy_status(sc, URE_PHY_STAT_LAN_ON, &reg);
 
 	if ((err = ure_clrbit_2(sc, URE_USB_U2P3_CTRL,
 	    URE_MCU_TYPE_USB,
@@ -1757,10 +1751,7 @@ ure_rtl8157_init(ure_softc_t *sc)
 	if ((err = ure_rtl8153_phy_status(sc, 0, &reg)) != USB_SUCCESS) {
 		return (err);
 	}
-	if ((err = ure_rtl8153_phy_status(sc, URE_PHY_STAT_LAN_ON,
-	    &reg)) != USB_SUCCESS) {
-		return (err);
-	}
+	(void) ure_rtl8153_phy_status(sc, URE_PHY_STAT_LAN_ON, &reg);
 
 	/* Disable U2P3 via OCP command interface */
 	if ((err = ure_ocp_cmd_clrbit(sc, URE_USB_U2P3_CTRL2,
