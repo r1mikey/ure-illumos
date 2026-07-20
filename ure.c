@@ -672,6 +672,8 @@ ure_ocp_cmd_read(ure_softc_t *sc, uint16_t addr, int type, uint32_t *valp)
 	}
 	if (i == 10) {
 		dev_err(sc->ure_dip, CE_WARN, "OCP cmd read pre-busy timeout");
+		*valp = 0;
+		return (USB_FAILURE);
 	}
 
 	if ((err = ure_write_2(sc, URE_USB_CMD_ADDR,
@@ -699,6 +701,8 @@ ure_ocp_cmd_read(ure_softc_t *sc, uint16_t addr, int type, uint32_t *valp)
 	}
 	if (i == 10) {
 		dev_err(sc->ure_dip, CE_WARN, "OCP cmd read post-busy timeout");
+		*valp = 0;
+		return (USB_FAILURE);
 	}
 
 	return (ure_read_4(sc, URE_USB_CMD_DATA, URE_MCU_TYPE_USB, valp));
@@ -725,6 +729,7 @@ ure_ocp_cmd_write(ure_softc_t *sc, uint16_t addr, int type, uint32_t data)
 	}
 	if (i == 10) {
 		dev_err(sc->ure_dip, CE_WARN, "OCP cmd write pre-busy timeout");
+		return (USB_FAILURE);
 	}
 
 	if ((err = ure_write_4(sc, URE_USB_CMD_DATA,
@@ -1035,6 +1040,7 @@ ure_reset(ure_softc_t *sc)
 		if (i == URE_TIMEOUT) {
 			dev_err(sc->ure_dip, CE_WARN,
 			    "reset never completed");
+			return (USB_FAILURE);
 		}
 	}
 	return (USB_SUCCESS);
@@ -1118,6 +1124,8 @@ ure_rtl8153_phy_status(ure_softc_t *sc, int desired, uint16_t *regp)
 	if (i == 500) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "timeout waiting for PHY to stabilize");
+		*regp = reg;
+		return (USB_FAILURE);
 	}
 
 	*regp = reg;
