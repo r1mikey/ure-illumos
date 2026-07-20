@@ -4949,10 +4949,10 @@ ure_quiesce(dev_info_t *dip)
 	(void) ure_write_1(sc, URE_PLA_CR, URE_MCU_TYPE_PLA, 0);
 
 	/* Power down PHY */
-	if (ure_phy_read(sc, URE_OCP_BMCR, &val) != USB_SUCCESS) {
-		return (DDI_SUCCESS);
+	if (ure_phy_read(sc, URE_OCP_BMCR, &val) == USB_SUCCESS) {
+		(void) ure_phy_write(sc, URE_OCP_BMCR,
+		    val | URE_OCP_BMCR_PDOWN);
 	}
-	(void) ure_phy_write(sc, URE_OCP_BMCR, val | URE_OCP_BMCR_PDOWN);
 
 	/*
 	 * Mark gone only after the best-effort register writes above
