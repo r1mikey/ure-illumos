@@ -2902,7 +2902,7 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 				break;
 			}
 
-			if (pktlen > (int)total_len || pktlen < ETHERMIN) {
+			if (pktlen > (int)total_len || pktlen < ETHERMIN + ETHERFCSL) {
 				atomic_add_64(&sc->ure_stat_ierrors, 1);
 				break;
 			}
