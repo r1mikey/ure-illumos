@@ -158,6 +158,7 @@ extern "C" {
 #define	URE_PLA_CONFIG6		0xe90a
 #define	URE_PLA_USB_CFG		0xe952
 #define	URE_PLA_ALDPS_STATUS	0xe000	/* ALDPS wait status */
+#define	URE_ALDPS_STATUS_IDLE	0x0100	/* ALDPS has reached idle */
 #define	URE_PLA_BYPASS_ALDPS	0xd3c8	/* bypass_turn_off_clk_in_aldps */
 #define	URE_PLA_BMU_0X2300	0x2300	/* BMU RX zero length */
 #define	URE_PLA_BMU_RX_IN	0x2350	/* BMU RX in reset */

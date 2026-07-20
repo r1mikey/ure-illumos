@@ -201,7 +201,7 @@ static void	ure_close_pipes(ure_softc_t *);
 static int	ure_tx_chain_construct(void *, void *, int);
 static void	ure_tx_chain_destroy(void *, void *);
 
-/* Register access and PHY primitives (used by macros in ure.h) */
+/* Register access and PHY primitives */
 static int	ure_ctl(ure_softc_t *, uint8_t, uint16_t, uint16_t,
 		    void *, int);
 static int	ure_read_mem(ure_softc_t *, uint16_t, uint16_t,
@@ -1581,6 +1581,8 @@ ure_rtl8153b_init(ure_softc_t *sc)
 	if ((err = ure_clrbit_2(sc, URE_PLA_CONFIG34,
 	    URE_MCU_TYPE_PLA,
 	    URE_LINK_OFF_WAKE_EN)) != USB_SUCCESS) {
+		(void) ure_write_1(sc, URE_PLA_CRWECR,
+		    URE_MCU_TYPE_PLA, URE_CRWECR_NORMAL);
 		return (err);
 	}
 	if ((err = ure_write_1(sc, URE_PLA_CRWECR,
@@ -1815,6 +1817,8 @@ ure_rtl8157_init(ure_softc_t *sc)
 	}
 	if ((err = ure_clrbit_2(sc, URE_PLA_CONFIG34, URE_MCU_TYPE_PLA,
 	    URE_LINK_OFF_WAKE_EN)) != USB_SUCCESS) {
+		(void) ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
+		    URE_CRWECR_NORMAL);
 		return (err);
 	}
 	if ((err = ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
@@ -2120,7 +2124,7 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		    &val)) != USB_SUCCESS) {
 			return (err);
 		}
-		if (val & 0x0100) {
+		if (val & URE_ALDPS_STATUS_IDLE) {
 			break;
 		}
 	}
@@ -2391,6 +2395,8 @@ ure_ifmedia_init(ure_softc_t *sc)
 		if ((err = ure_write_mem(sc, URE_PLA_IDR,
 		    URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
 		    addr, sizeof (addr))) != USB_SUCCESS) {
+			(void) ure_write_1(sc, URE_PLA_CRWECR,
+			    URE_MCU_TYPE_PLA, URE_CRWECR_NORMAL);
 			return (err);
 		}
 		if ((err = ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
@@ -3072,7 +3078,7 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 
 	/*
 	 * If the pipe is idle or down to one queued transfer, flush the
-	 * coalescing buffer NOW -- before any other bookkeeping -- to
+	 * coalescing buffer NOW, before any other bookkeeping, to
 	 * minimise the window where no TD is on the xHCI ring.
 	 *
 	 * When tx_cnt == 0 the pipe is already idle and our
@@ -3091,7 +3097,7 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 		mutex_exit(&sc->ure_txc_lock);
 	}
 
-	/* Stats and cleanup -- off the critical path now */
+	/* Stats and cleanup: off the critical path now */
 	if (ok) {
 		atomic_add_64(&sc->ure_stat_opackets, npkts);
 		atomic_add_64(&sc->ure_stat_obytes, nbytes);
@@ -3115,7 +3121,7 @@ ure_tx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 /*
  * TX coalescing.
  *
- * USBA serialises bulk pipe submissions -- only one transfer is active
+ * USBA serialises bulk pipe submissions: only one transfer is active
  * on the wire at a time.  Without coalescing, MAC hands us one packet
  * per mc_tx call and each ~1500-byte frame costs a full USB round-trip,
  * capping throughput far below line rate.
@@ -3139,6 +3145,8 @@ static void
 ure_txc_submit(ure_softc_t *sc, ure_tx_chain_t *chain)
 {
 	usb_bulk_req_t *req;
+	boolean_t was_full;
+	boolean_t do_update;
 	int rval;
 
 	req = usb_alloc_bulk_req(sc->ure_dip, 0, USB_FLAGS_NOSLEEP);
@@ -3147,8 +3155,17 @@ ure_txc_submit(ure_softc_t *sc, ure_tx_chain_t *chain)
 		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
 		kmem_cache_free(sc->ure_tx_cache, chain);
 		mutex_enter(&sc->ure_tx_lock);
+		was_full = (sc->ure_tx_cnt >= URE_TX_MAX);
 		sc->ure_tx_cnt--;
 		mutex_exit(&sc->ure_tx_lock);
+		if (was_full) {
+			mutex_enter(&sc->ure_lock);
+			do_update = sc->ure_running && !sc->ure_gone;
+			mutex_exit(&sc->ure_lock);
+			if (do_update) {
+				mac_tx_update(sc->ure_mh);
+			}
+		}
 		return;
 	}
 
@@ -3169,8 +3186,17 @@ ure_txc_submit(ure_softc_t *sc, ure_tx_chain_t *chain)
 		chain->uc_buf->b_wptr = chain->uc_buf->b_rptr;
 		kmem_cache_free(sc->ure_tx_cache, chain);
 		mutex_enter(&sc->ure_tx_lock);
+		was_full = (sc->ure_tx_cnt >= URE_TX_MAX);
 		sc->ure_tx_cnt--;
 		mutex_exit(&sc->ure_tx_lock);
+		if (was_full) {
+			mutex_enter(&sc->ure_lock);
+			do_update = sc->ure_running && !sc->ure_gone;
+			mutex_exit(&sc->ure_lock);
+			if (do_update) {
+				mac_tx_update(sc->ure_mh);
+			}
+		}
 	}
 }
 
@@ -3244,7 +3270,7 @@ ure_txc_discard(ure_softc_t *sc)
 }
 
 /*
- * Coalescing timer callback -- flush whatever has accumulated.
+ * Coalescing timer callback: flush whatever has accumulated.
  */
 static void
 ure_txc_timeout(void *arg)
@@ -3401,7 +3427,7 @@ ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
 }
 
 /*
- * mc_tx callback -- transmit a chain of mblk_t packets.
+ * mc_tx callback: transmit a chain of mblk_t packets.
  *
  * Packs frames into a coalescing buffer.  The buffer is flushed to
  * USB when full or when the coalescing timer fires, whichever comes
@@ -3478,7 +3504,7 @@ ure_m_tx(void *arg, mblk_t *mp)
 				    &sc->ure_stat_oerrors, 1);
 				continue;
 			}
-			/* Buffer full -- flush and retry */
+			/* Buffer full, flush and retry */
 			ure_txc_flush_locked(sc);
 			continue;
 		}
@@ -3693,16 +3719,19 @@ ure_m_start(void *arg)
 	}
 
 	if (error != 0) {
+		(void) ure_phy_powerdown(sc);
 		mutex_exit(&sc->ure_lock);
 		return (EIO);
 	}
 
 	/* Setup MAC, TX/RX, filters */
 	if ((error = ure_ifmedia_init(sc)) != 0) {
+		(void) ure_phy_powerdown(sc);
 		mutex_exit(&sc->ure_lock);
 		return (EIO);
 	}
 	if (ure_set_rx_filter(sc) != 0) {
+		(void) ure_phy_powerdown(sc);
 		mutex_exit(&sc->ure_lock);
 		return (EIO);
 	}
@@ -3844,10 +3873,10 @@ static int
 ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 {
 	ure_softc_t *sc = (ure_softc_t *)arg;
+	ure_mcast_entry_t *me;
 
 	mutex_enter(&sc->ure_lock);
 	if (add) {
-		ure_mcast_entry_t *me;
 		me = kmem_zalloc(sizeof (*me), KM_NOSLEEP);
 		if (me == NULL) {
 			mutex_exit(&sc->ure_lock);
@@ -3856,12 +3885,10 @@ ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 		bcopy(mca, me->addr, ETHERADDRL);
 		list_insert_tail(&sc->ure_mcast_list, me);
 	} else {
-		ure_mcast_entry_t *me;
 		for (me = list_head(&sc->ure_mcast_list); me != NULL;
 		    me = list_next(&sc->ure_mcast_list, me)) {
 			if (bcmp(me->addr, mca, ETHERADDRL) == 0) {
 				list_remove(&sc->ure_mcast_list, me);
-				kmem_free(me, sizeof (*me));
 				break;
 			}
 		}
@@ -3869,9 +3896,24 @@ ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 	ure_mcast_hash_rebuild(sc);
 	if (sc->ure_running) {
 		if (ure_set_rx_filter(sc) != 0) {
+			/*
+			 * Roll back the list change so software state
+			 * stays in sync with what the hardware has.
+			 */
+			if (add) {
+				list_remove(&sc->ure_mcast_list, me);
+				kmem_free(me, sizeof (*me));
+			} else if (me != NULL) {
+				list_insert_tail(&sc->ure_mcast_list, me);
+			}
+			ure_mcast_hash_rebuild(sc);
 			mutex_exit(&sc->ure_lock);
 			return (EIO);
 		}
+	}
+	/* Free the removed entry only after the filter is programmed */
+	if (!add && me != NULL) {
+		kmem_free(me, sizeof (*me));
 	}
 	mutex_exit(&sc->ure_lock);
 
@@ -4549,7 +4591,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		if (ure_chip_init(sc) != 0) {
 			dev_err(dip, CE_WARN,
 			    "chip init failed on resume");
-			return (DDI_FAILURE);
+			goto resume_fail;
 		}
 
 		if (was_running) {
@@ -4559,7 +4601,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			if (ure_phy_powerup(sc) != 0) {
 				dev_err(dip, CE_WARN,
 				    "PHY powerup failed on resume");
-				return (DDI_FAILURE);
+				goto resume_fail;
 			}
 
 			mutex_enter(&sc->ure_lock);
@@ -4575,7 +4617,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 				mutex_exit(&sc->ure_lock);
 				dev_err(dip, CE_WARN,
 				    "NIC reset failed on resume");
-				return (DDI_FAILURE);
+				goto resume_fail;
 			}
 
 			/* Restore MAC, TX/RX config, filters */
@@ -4583,13 +4625,13 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 				mutex_exit(&sc->ure_lock);
 				dev_err(dip, CE_WARN,
 				    "media init failed on resume");
-				return (DDI_FAILURE);
+				goto resume_fail;
 			}
 			if (ure_set_rx_filter(sc) != 0) {
 				mutex_exit(&sc->ure_lock);
 				dev_err(dip, CE_WARN,
 				    "RX filter setup failed on resume");
-				return (DDI_FAILURE);
+				goto resume_fail;
 			}
 
 			sc->ure_running = B_TRUE;
@@ -4604,6 +4646,15 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		}
 
 		return (DDI_SUCCESS);
+
+	resume_fail:
+		mutex_enter(&sc->ure_lock);
+		sc->ure_gone = B_TRUE;
+		mutex_exit(&sc->ure_lock);
+		if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
+			mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
+		}
+		return (DDI_FAILURE);
 	default:
 		return (DDI_FAILURE);
 	}

@@ -11,7 +11,7 @@
 # The driver is built for amd64 by default.  Override KARCH for
 # other architectures (e.g., KARCH=aarch64).
 #
-# Prerequisites:
+# Build requirements:
 #   - illumos kernel headers in /usr/include (from system-header package)
 #   - gcc (system compiler)
 #

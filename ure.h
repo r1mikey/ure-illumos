@@ -121,7 +121,7 @@ extern "C" {
 #define	URE_ATTACH_TX_CACHE	0x0200	/* TX chain kmem_cache created */
 
 /*
- * Endpoint indices.
+ * Endpoint indices (unused - retained for reference).
  */
 #define	URE_ENDPT_RX		0
 #define	URE_ENDPT_TX		1
@@ -163,7 +163,7 @@ typedef struct ure_tx_chain {
  *   ure_lock    - protects softstate, link state, flags, RX path,
  *                 multicast hash, chip registers.  Never held during
  *                 bulk USB I/O.
- *   ure_tx_lock - protects ure_tx_cnt (TX in-flight counter) only.
+ *   ure_tx_lock - protects ure_tx_cnt and ure_tx_watchdog.
  *                 Brief hold; never held simultaneously with ure_lock.
  *
  * RX aggregation buffer parsing and mac_rx() upcalls run inline in
