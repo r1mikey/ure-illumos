@@ -224,6 +224,10 @@ static int	ure_clrbit_2(ure_softc_t *, uint16_t, uint16_t, uint16_t);
 static int	ure_clrbit_4(ure_softc_t *, uint16_t, uint16_t, uint32_t);
 static int	ure_ocp_reg_read(ure_softc_t *, uint16_t, uint16_t *);
 static int	ure_ocp_reg_write(ure_softc_t *, uint16_t, uint16_t);
+static int	ure_ocp_cmd_read(ure_softc_t *, uint16_t, int, uint32_t *);
+static int	ure_ocp_cmd_write(ure_softc_t *, uint16_t, int, uint32_t);
+static int	ure_ocp_cmd_setbit(ure_softc_t *, uint16_t, int, uint32_t);
+static int	ure_ocp_cmd_clrbit(ure_softc_t *, uint16_t, int, uint32_t);
 static int	ure_rtl8157_ocp_reg_read(ure_softc_t *, uint16_t,
 		    uint16_t *);
 static int	ure_rtl8157_ocp_reg_write(ure_softc_t *, uint16_t,
@@ -367,8 +371,7 @@ ure_ctl(ure_softc_t *sc, uint8_t rw, uint16_t val, uint16_t index,
 	if (rw == URE_CTL_WRITE) {
 		setup.bmRequestType = USB_DEV_REQ_HOST_TO_DEV |
 		    USB_DEV_REQ_TYPE_VENDOR | USB_DEV_REQ_RCPT_DEV;
-	}
-	else {
+	} else {
 		setup.bmRequestType = USB_DEV_REQ_DEV_TO_HOST |
 		    USB_DEV_REQ_TYPE_VENDOR | USB_DEV_REQ_RCPT_DEV;
 	}
@@ -603,13 +606,17 @@ ure_clrbit_4(ure_softc_t *sc, uint16_t reg, uint16_t index, uint32_t bits)
 static int
 ure_ocp_reg_read(ure_softc_t *sc, uint16_t addr, uint16_t *valp)
 {
+	uint16_t base = addr & 0xf000;
 	uint16_t reg;
 	int err;
 
-	if ((err = ure_write_2(sc, URE_PLA_OCP_GPHY_BASE,
-	    URE_MCU_TYPE_PLA, addr & 0xf000)) != USB_SUCCESS) {
-		*valp = 0;
-		return (err);
+	if (sc->ure_ocp_base != base) {
+		if ((err = ure_write_2(sc, URE_PLA_OCP_GPHY_BASE,
+		    URE_MCU_TYPE_PLA, base)) != USB_SUCCESS) {
+			*valp = 0;
+			return (err);
+		}
+		sc->ure_ocp_base = base;
 	}
 	reg = (addr & 0x0fff) | 0xb000;
 
@@ -619,16 +626,141 @@ ure_ocp_reg_read(ure_softc_t *sc, uint16_t addr, uint16_t *valp)
 static int
 ure_ocp_reg_write(ure_softc_t *sc, uint16_t addr, uint16_t data)
 {
+	uint16_t base = addr & 0xf000;
 	uint16_t reg;
 	int err;
 
-	if ((err = ure_write_2(sc, URE_PLA_OCP_GPHY_BASE,
-	    URE_MCU_TYPE_PLA, addr & 0xf000)) != USB_SUCCESS) {
-		return (err);
+	if (sc->ure_ocp_base != base) {
+		if ((err = ure_write_2(sc, URE_PLA_OCP_GPHY_BASE,
+		    URE_MCU_TYPE_PLA, base)) != USB_SUCCESS) {
+			return (err);
+		}
+		sc->ure_ocp_base = base;
 	}
 	reg = (addr & 0x0fff) | 0xb000;
 
 	return (ure_write_2(sc, reg, URE_MCU_TYPE_PLA, data));
+}
+
+/*
+ * RTL8157 OCP command interface.
+ *
+ * The RTL8157 has a separate 32-bit command register block for BMU and
+ * IP-layer access.  Commands are issued through URE_USB_CMD_ADDR,
+ * URE_USB_CMD_DATA, and URE_USB_CMD.  The busy flag in URE_USB_CMD
+ * is polled before and after each command.
+ */
+static int
+ure_ocp_cmd_read(ure_softc_t *sc, uint16_t addr, int type, uint32_t *valp)
+{
+	uint16_t cmd, busy;
+	int err, i;
+
+	cmd = (type == URE_CMD_TYPE_BMU) ? URE_CMD_BMU : URE_CMD_IP;
+
+	/* Wait for any previous command to finish */
+	for (i = 0; i < 10; i++) {
+		if ((err = ure_read_2(sc, URE_USB_CMD,
+		    URE_MCU_TYPE_USB, &busy)) != USB_SUCCESS) {
+			*valp = 0;
+			return (err);
+		}
+		if (!(busy & URE_CMD_BUSY)) {
+			break;
+		}
+		delay(drv_usectohz(1000));
+	}
+	if (i == 10) {
+		dev_err(sc->ure_dip, CE_WARN, "OCP cmd read pre-busy timeout");
+	}
+
+	if ((err = ure_write_2(sc, URE_USB_CMD_ADDR,
+	    URE_MCU_TYPE_USB, addr)) != USB_SUCCESS) {
+		*valp = 0;
+		return (err);
+	}
+	if ((err = ure_write_2(sc, URE_USB_CMD,
+	    URE_MCU_TYPE_USB, cmd | URE_CMD_BUSY)) != USB_SUCCESS) {
+		*valp = 0;
+		return (err);
+	}
+
+	/* Wait for command completion */
+	for (i = 0; i < 10; i++) {
+		if ((err = ure_read_2(sc, URE_USB_CMD,
+		    URE_MCU_TYPE_USB, &busy)) != USB_SUCCESS) {
+			*valp = 0;
+			return (err);
+		}
+		if (!(busy & URE_CMD_BUSY)) {
+			break;
+		}
+		delay(drv_usectohz(1000));
+	}
+	if (i == 10) {
+		dev_err(sc->ure_dip, CE_WARN, "OCP cmd read post-busy timeout");
+	}
+
+	return (ure_read_4(sc, URE_USB_CMD_DATA, URE_MCU_TYPE_USB, valp));
+}
+
+static int
+ure_ocp_cmd_write(ure_softc_t *sc, uint16_t addr, int type, uint32_t data)
+{
+	uint16_t cmd, busy;
+	int err, i;
+
+	cmd = (type == URE_CMD_TYPE_BMU) ? URE_CMD_BMU : URE_CMD_IP;
+
+	/* Wait for any previous command to finish */
+	for (i = 0; i < 10; i++) {
+		if ((err = ure_read_2(sc, URE_USB_CMD,
+		    URE_MCU_TYPE_USB, &busy)) != USB_SUCCESS) {
+			return (err);
+		}
+		if (!(busy & URE_CMD_BUSY)) {
+			break;
+		}
+		delay(drv_usectohz(1000));
+	}
+	if (i == 10) {
+		dev_err(sc->ure_dip, CE_WARN, "OCP cmd write pre-busy timeout");
+	}
+
+	if ((err = ure_write_4(sc, URE_USB_CMD_DATA,
+	    URE_MCU_TYPE_USB, data)) != USB_SUCCESS) {
+		return (err);
+	}
+	if ((err = ure_write_2(sc, URE_USB_CMD_ADDR,
+	    URE_MCU_TYPE_USB, addr)) != USB_SUCCESS) {
+		return (err);
+	}
+	return (ure_write_2(sc, URE_USB_CMD,
+	    URE_MCU_TYPE_USB, cmd | URE_CMD_BUSY | URE_CMD_WRITE));
+}
+
+static int
+ure_ocp_cmd_setbit(ure_softc_t *sc, uint16_t addr, int type, uint32_t bits)
+{
+	uint32_t val;
+	int err;
+
+	if ((err = ure_ocp_cmd_read(sc, addr, type, &val)) != USB_SUCCESS) {
+		return (err);
+	}
+	return (ure_ocp_cmd_write(sc, addr, type, val | bits));
+}
+
+static int
+ure_ocp_cmd_clrbit(ure_softc_t *sc, uint16_t addr, int type, uint32_t bits)
+{
+	uint32_t val;
+	int err;
+
+	if ((err = ure_ocp_cmd_read(sc, addr, type, &val)) != USB_SUCCESS) {
+		return (err);
+	}
+	return (ure_ocp_cmd_write(sc, addr, type, val & ~bits));
 }
 
 /*
@@ -729,6 +861,11 @@ ure_rtl8157_ocp_reg_write(ure_softc_t *sc, uint16_t addr,
 		drv_usecwait(1000);
 	}
 	if (i == 10) {
+		/*
+		 * The register write was sent to the device but the
+		 * TGPHY busy flag did not clear.  This can be transient,
+		 * so log and continue rather than aborting init.
+		 */
 		dev_err(sc->ure_dip, CE_WARN, "PHY write timeout");
 	}
 	return (USB_SUCCESS);
@@ -910,7 +1047,30 @@ ure_reset_bmu(ure_softc_t *sc)
 	int err;
 
 	if (sc->ure_flags & URE_FLAG_8157) {
-		/* RTL8157 uses OCP command interface */
+		if ((err = ure_ocp_cmd_setbit(sc, URE_PLA_BMU_RX_IN,
+		    URE_CMD_TYPE_BMU, URE_PLA_BMU_RESET_0X02)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_ocp_cmd_setbit(sc, URE_PLA_BMU_RX_OUT,
+		    URE_CMD_TYPE_BMU, URE_PLA_BMU_RESET_0X01)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_ocp_cmd_setbit(sc, URE_PLA_BMU_RX_IN,
+		    URE_CMD_TYPE_BMU, URE_PLA_BMU_RESET_0X01)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_ocp_cmd_setbit(sc, URE_PLA_BMU_TX_IN,
+		    URE_CMD_TYPE_BMU, URE_PLA_BMU_RESET_0X02)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_ocp_cmd_setbit(sc, URE_PLA_BMU_TX_OUT,
+		    URE_CMD_TYPE_BMU, URE_PLA_BMU_RESET_0X01)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_ocp_cmd_setbit(sc, URE_PLA_BMU_TX_IN,
+		    URE_CMD_TYPE_BMU, URE_PLA_BMU_RESET_0X01)) != USB_SUCCESS) {
+			return (err);
+		}
 		return (USB_SUCCESS);
 	}
 
@@ -996,12 +1156,12 @@ ure_wait_for_flash(ure_softc_t *sc)
 			if (i == 100) {
 				dev_err(sc->ure_dip, CE_WARN,
 				    "timeout waiting for flash");
-				return (ETIMEDOUT);
+				return (USB_FAILURE);
 			}
 		}
 	}
 
-	return (0);
+	return (USB_SUCCESS);
 }
 
 static int
@@ -1095,7 +1255,7 @@ ure_rtl8152_init(ure_softc_t *sc)
 		return (err);
 	}
 
-	return (0);
+	return (USB_SUCCESS);
 }
 
 static int
@@ -1123,7 +1283,7 @@ ure_rtl8153_init(ure_softc_t *sc)
 	if (i == 500) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "timeout waiting for chip autoload");
-		return (ETIMEDOUT);
+		return (USB_FAILURE);
 	}
 
 	if ((err = ure_rtl8153_phy_status(sc, 0, &reg)) != 0) {
@@ -1252,15 +1412,11 @@ ure_rtl8153_init(ure_softc_t *sc)
 	}
 
 	/*
-	 * Do not re-enable U1/U2 device-side link power management.
-	 * The RTL8153 family is known to initiate U1/U2 transitions
-	 * that cause link instability and spontaneous disconnects.
-	 * Linux carries USB_QUIRK_NO_LPM for 0bda:8153 to prevent
-	 * host-side U1/U2 negotiation; since illumos USBA has no
-	 * device quirk mechanism, we suppress it here at the device
-	 * register level instead.
+	 * Disable all MAC power management features (clock gating,
+	 * EEE/L1/U1U2 speed-down, packet-available speed-down, etc.)
+	 * to avoid link instability and spontaneous disconnects.
+	 * This matches OpenBSD.
 	 */
-
 	(void) ure_write_2(sc, URE_PLA_MAC_PWR_CTRL,
 	    URE_MCU_TYPE_PLA, 0);
 	(void) ure_write_2(sc, URE_PLA_MAC_PWR_CTRL2,
@@ -1283,7 +1439,7 @@ ure_rtl8153_init(ure_softc_t *sc)
 		return (err);
 	}
 
-	return (0);
+	return (USB_SUCCESS);
 }
 
 static int
@@ -1326,7 +1482,7 @@ ure_rtl8153b_init(ure_softc_t *sc)
 
 	if (sc->ure_flags & URE_FLAG_8156B) {
 		if (ure_wait_for_flash(sc) != 0) {
-			return (ETIMEDOUT);
+			return (USB_FAILURE);
 		}
 	}
 
@@ -1343,7 +1499,7 @@ ure_rtl8153b_init(ure_softc_t *sc)
 	if (i == 500) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "timeout waiting for chip autoload");
-		return (ETIMEDOUT);
+		return (USB_FAILURE);
 	}
 
 	if ((err = ure_rtl8153_phy_status(sc, 0,
@@ -1427,7 +1583,7 @@ ure_rtl8153b_init(ure_softc_t *sc)
 	}
 	if ((err = ure_write_1(sc, URE_PLA_CRWECR,
 	    URE_MCU_TYPE_PLA,
-	    URE_CRWECR_NORAML)) != USB_SUCCESS) {
+	    URE_CRWECR_NORMAL)) != USB_SUCCESS) {
 		return (err);
 	}
 
@@ -1518,12 +1674,12 @@ ure_rtl8153b_init(ure_softc_t *sc)
 	}
 
 	if (!(sc->ure_flags & URE_FLAG_8153B)) {
-		if ((err = ure_phy_read(sc, 0xa5b4,
+		if ((err = ure_phy_read(sc, URE_OCP_PHY_0XA5B4,
 		    &reg)) != 0) {
 			return (err);
 		}
-		if ((err = ure_phy_write(sc, 0xa5b4,
-		    reg & ~0x8000)) != 0) {
+		if ((err = ure_phy_write(sc, URE_OCP_PHY_0XA5B4,
+		    reg & ~URE_OCP_PHY_0XA5B4_DIS)) != 0) {
 			return (err);
 		}
 	}
@@ -1534,7 +1690,7 @@ ure_rtl8153b_init(ure_softc_t *sc)
 		return (err);
 	}
 
-	return (0);
+	return (USB_SUCCESS);
 }
 
 static int
@@ -1545,11 +1701,11 @@ ure_rtl8157_init(ure_softc_t *sc)
 	int err;
 	int i;
 
-	if ((err = ure_setbit_1(sc, 0xcffe, URE_MCU_TYPE_USB,
+	if ((err = ure_setbit_1(sc, URE_USB_UNDOC_CFFE, URE_MCU_TYPE_USB,
 	    0x0008)) != USB_SUCCESS) {
 		return (err);
 	}
-	if ((err = ure_clrbit_1(sc, 0xd3ca, URE_MCU_TYPE_USB,
+	if ((err = ure_clrbit_1(sc, URE_USB_UNDOC_D3CA, URE_MCU_TYPE_USB,
 	    0x0001)) != USB_SUCCESS) {
 		return (err);
 	}
@@ -1583,11 +1739,11 @@ ure_rtl8157_init(ure_softc_t *sc)
 	if (i == 500) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "timeout waiting for chip autoload");
-		return (ETIMEDOUT);
+		return (USB_FAILURE);
 	}
 
 	if (ure_wait_for_flash(sc) != 0) {
-		return (ETIMEDOUT);
+		return (USB_FAILURE);
 	}
 
 	if ((err = ure_rtl8153_phy_status(sc, 0, &reg)) != USB_SUCCESS) {
@@ -1595,6 +1751,18 @@ ure_rtl8157_init(ure_softc_t *sc)
 	}
 	if ((err = ure_rtl8153_phy_status(sc, URE_PHY_STAT_LAN_ON,
 	    &reg)) != USB_SUCCESS) {
+		return (err);
+	}
+
+	/* Disable U2P3 via OCP command interface */
+	if ((err = ure_ocp_cmd_clrbit(sc, URE_USB_U2P3_CTRL2,
+	    URE_CMD_TYPE_IP, URE_U2P3_CTRL2_ENABLE)) != USB_SUCCESS) {
+		return (err);
+	}
+
+	/* Disable interrupt mitigation */
+	if ((err = ure_clrbit_1(sc, URE_USB_INT_MITIGATION,
+	    URE_MCU_TYPE_USB, URE_USB_INT_MIT_MASK)) != USB_SUCCESS) {
 		return (err);
 	}
 
@@ -1651,7 +1819,7 @@ ure_rtl8157_init(ure_softc_t *sc)
 		return (err);
 	}
 	if ((err = ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
-	    URE_CRWECR_NORAML)) != USB_SUCCESS) {
+	    URE_CRWECR_NORMAL)) != USB_SUCCESS) {
 		return (err);
 	}
 
@@ -1691,6 +1859,12 @@ ure_rtl8157_init(ure_softc_t *sc)
 		return (err);
 	}
 
+	/* Disable bypass_turn_off_clk_in_aldps */
+	if ((err = ure_clrbit_1(sc, URE_PLA_BYPASS_ALDPS,
+	    URE_MCU_TYPE_PLA, 0x01)) != USB_SUCCESS) {
+		return (err);
+	}
+
 	if ((err = ure_clrbit_2(sc, URE_PLA_MAC_PWR_CTRL3,
 	    URE_MCU_TYPE_PLA, URE_PLA_MCU_SPDWN_EN)) != USB_SUCCESS) {
 		return (err);
@@ -1715,18 +1889,32 @@ ure_rtl8157_init(ure_softc_t *sc)
 
 	/* Enable Rx aggregation */
 	if ((err = ure_clrbit_2(sc, URE_USB_USB_CTRL, URE_MCU_TYPE_USB,
-	    URE_RX_AGG_DISABLE | 0x0400)) != USB_SUCCESS) {
+	    URE_RX_AGG_DISABLE | URE_USB_RX_AGG_0X0400)) != USB_SUCCESS) {
 		return (err);
 	}
 
-	if ((err = ure_phy_read(sc, 0xa5b4, &reg)) != USB_SUCCESS) {
+	/* Disable Rx zero length via OCP command */
+	if ((err = ure_ocp_cmd_clrbit(sc, URE_PLA_BMU_0X2300,
+	    URE_CMD_TYPE_BMU, URE_PLA_BMU_0X2300_RZL)) != USB_SUCCESS) {
 		return (err);
 	}
-	if (reg != 0xffff) {
-		if ((err = ure_phy_write(sc, 0xa5b4,
-		    reg & ~0x8000)) != USB_SUCCESS) {
-			return (err);
-		}
+
+	if ((err = ure_clrbit_1(sc, URE_USB_UNDOC_D4AE,
+	    URE_MCU_TYPE_USB, 0x02)) != USB_SUCCESS) {
+		return (err);
+	}
+
+	if ((err = ure_phy_read(sc, URE_OCP_PHY_0XA5B4, &reg)) != USB_SUCCESS) {
+		return (err);
+	}
+	if (reg == 0xffff) {
+		dev_err(sc->ure_dip, CE_WARN,
+		    "PHY register 0xa5b4 returned 0xffff, PHY not responding");
+		return (USB_FAILURE);
+	}
+	if ((err = ure_phy_write(sc, URE_OCP_PHY_0XA5B4,
+	    reg & ~URE_OCP_PHY_0XA5B4_DIS)) != USB_SUCCESS) {
+		return (err);
 	}
 
 	if ((err = ure_setbit_2(sc, URE_PLA_RSTTALLY, URE_MCU_TYPE_PLA,
@@ -1734,7 +1922,7 @@ ure_rtl8157_init(ure_softc_t *sc)
 		return (err);
 	}
 
-	return (0);
+	return (USB_SUCCESS);
 }
 
 /*
@@ -1768,7 +1956,7 @@ ure_rtl8152_nic_reset(ure_softc_t *sc)
 		return (err);
 	}
 	if ((err = ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
-	    URE_CRWECR_NORAML)) != USB_SUCCESS) {
+	    URE_CRWECR_NORMAL)) != USB_SUCCESS) {
 		return (err);
 	}
 	if ((err = ure_write_1(sc, URE_PLA_CR, URE_MCU_TYPE_PLA,
@@ -1797,7 +1985,7 @@ ure_rtl8152_nic_reset(ure_softc_t *sc)
 	if (i == URE_TIMEOUT) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "timeout waiting for OOB control");
-		return (ETIMEDOUT);
+		return (USB_FAILURE);
 	}
 	if ((err = ure_setbit_2(sc, URE_PLA_SFF_STS_7, URE_MCU_TYPE_PLA,
 	    URE_RE_INIT_LL)) != USB_SUCCESS) {
@@ -1816,7 +2004,7 @@ ure_rtl8152_nic_reset(ure_softc_t *sc)
 	if (i == URE_TIMEOUT) {
 		dev_err(sc->ure_dip, CE_WARN,
 		    "timeout waiting for OOB control (2)");
-		return (ETIMEDOUT);
+		return (USB_FAILURE);
 	}
 
 	if ((err = ure_reset(sc)) != USB_SUCCESS) {
@@ -1882,7 +2070,7 @@ ure_rtl8152_nic_reset(ure_softc_t *sc)
 		return (err);
 	}
 
-	return (0);
+	return (USB_SUCCESS);
 }
 
 static int
@@ -1929,7 +2117,7 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 	}
 	for (i = 0; i < 20; i++) {
 		delay(drv_usectohz(1000));
-		if ((err = ure_read_2(sc, 0xe000, URE_MCU_TYPE_PLA,
+		if ((err = ure_read_2(sc, URE_PLA_ALDPS_STATUS, URE_MCU_TYPE_PLA,
 		    &val)) != USB_SUCCESS) {
 			return (err);
 		}
@@ -1980,7 +2168,7 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		if (i == URE_TIMEOUT) {
 			dev_err(sc->ure_dip, CE_WARN,
 			    "timeout waiting for OOB control");
-			return (ETIMEDOUT);
+			return (USB_FAILURE);
 		}
 		if ((err = ure_setbit_2(sc, URE_PLA_SFF_STS_7,
 		    URE_MCU_TYPE_PLA, URE_RE_INIT_LL)) != USB_SUCCESS) {
@@ -1999,7 +2187,7 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		if (i == URE_TIMEOUT) {
 			dev_err(sc->ure_dip, CE_WARN,
 			    "timeout waiting for OOB (2)");
-			return (ETIMEDOUT);
+			return (USB_FAILURE);
 		}
 	}
 
@@ -2154,11 +2342,11 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 
 	if (sc->ure_flags & URE_FLAG_8157) {
 		/* Clear SDR */
-		if ((err = ure_setbit_1(sc, 0xd378, URE_MCU_TYPE_USB,
+		if ((err = ure_setbit_1(sc, URE_USB_SDR_D378, URE_MCU_TYPE_USB,
 		    0x0080)) != USB_SUCCESS) {
 			return (err);
 		}
-		if ((err = ure_clrbit_2(sc, 0xcd06, URE_MCU_TYPE_USB,
+		if ((err = ure_clrbit_2(sc, URE_USB_SDR_CD06, URE_MCU_TYPE_USB,
 		    0x8000)) != USB_SUCCESS) {
 			return (err);
 		}
@@ -2175,16 +2363,12 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 	}
 
 	/*
-	 * Do not re-enable U1/U2 device-side link power management.
-	 * These Realtek chips are known to initiate U1/U2 transitions
-	 * that cause link instability and spontaneous disconnects;
-	 * Linux carries USB_QUIRK_NO_LPM for 0bda:8153 to suppress
-	 * host-side U1/U2 negotiation.  Since illumos USBA has no
-	 * device quirk mechanism, we keep U1/U2 disabled at the
-	 * device register level instead.
+	 * U1/U2 device-side link power management is intentionally
+	 * left disabled.  These Realtek chips cause link instability
+	 * when U1/U2 transitions are enabled.
 	 */
 
-	return (0);
+	return (USB_SUCCESS);
 }
 
 
@@ -2211,7 +2395,7 @@ ure_ifmedia_init(ure_softc_t *sc)
 			return (err);
 		}
 		if ((err = ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA,
-		    URE_CRWECR_NORAML)) != USB_SUCCESS) {
+		    URE_CRWECR_NORMAL)) != USB_SUCCESS) {
 			return (err);
 		}
 	}
@@ -2798,8 +2982,7 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 				    ETHERADDRL) == 0) {
 					atomic_add_64(
 					    &sc->ure_stat_brdcstrcv, 1);
-				}
-				else {
+				} else {
 					atomic_add_64(
 					    &sc->ure_stat_multircv, 1);
 				}
@@ -2817,8 +3000,7 @@ ure_rx_cb(usb_pipe_handle_t ph, usb_bulk_req_t *req)
 		if (head != NULL) {
 			if (sc->ure_running && !sc->ure_gone) {
 				mac_rx(sc->ure_mh, NULL, head);
-			}
-			else {
+			} else {
 				freemsgchain(head);
 			}
 		}
@@ -3369,6 +3551,18 @@ ure_m_tx(void *arg, mblk_t *mp)
 		sc->ure_txc_chain->uc_npkts++;
 		sc->ure_txc_chain->uc_nbytes += mlen;
 
+		/* TX multicast/broadcast stats */
+		if (mp->b_rptr[0] & 0x01) {
+			if (bcmp(mp->b_rptr, ure_bcast_addr,
+			    ETHERADDRL) == 0) {
+				atomic_add_64(
+				    &sc->ure_stat_brdcstxmt, 1);
+			} else {
+				atomic_add_64(
+				    &sc->ure_stat_multixmt, 1);
+			}
+		}
+
 		/* 2e. Free this mblk and advance */
 		{
 			mblk_t *next = mp->b_next;
@@ -3430,6 +3624,12 @@ ure_m_stat(void *arg, uint_t stat, uint64_t *val)
 		break;
 	case MAC_STAT_BRDCSTRCV:
 		*val = sc->ure_stat_brdcstrcv;
+		break;
+	case MAC_STAT_MULTIXMT:
+		*val = sc->ure_stat_multixmt;
+		break;
+	case MAC_STAT_BRDCSTXMT:
+		*val = sc->ure_stat_brdcstxmt;
 		break;
 	case MAC_STAT_NORCVBUF:
 		*val = sc->ure_stat_norcvbuf;
@@ -3592,8 +3792,7 @@ ure_mcast_hash_bit(const uint8_t *addr)
 		for (j = 0; j < 8; j++) {
 			if (((crc >> 31) ^ (c & 1)) != 0) {
 				crc = (crc << 1) ^ 0x04c11db7;
-			}
-			else {
+			} else {
 				crc <<= 1;
 			}
 			c >>= 1;
@@ -3622,8 +3821,7 @@ ure_mcast_hash_rebuild(ure_softc_t *sc)
 		bit = ure_mcast_hash_bit(me->addr);
 		if (bit < 32) {
 			sc->ure_mcast_hash[0] |= (1U << bit);
-		}
-		else {
+		} else {
 			sc->ure_mcast_hash[1] |= (1U << (bit - 32));
 		}
 	}
@@ -3680,7 +3878,7 @@ ure_m_unicst(void *arg, const uint8_t *macaddr)
 		    URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
 		    addr, sizeof (addr));
 		ure_write_1(sc, URE_PLA_CRWECR,
-		    URE_MCU_TYPE_PLA, URE_CRWECR_NORAML);
+		    URE_MCU_TYPE_PLA, URE_CRWECR_NORMAL);
 	}
 	mutex_exit(&sc->ure_lock);
 
@@ -4001,6 +4199,13 @@ ure_reconnect_cb(dev_info_t *dip)
 	if (was_running) {
 		int error;
 
+		/* Clear PHY power-down before NIC reset */
+		if (ure_phy_powerup(sc) != 0) {
+			dev_err(sc->ure_dip, CE_WARN,
+			    "PHY powerup failed on reconnect");
+			return (DDI_SUCCESS);
+		}
+
 		mutex_enter(&sc->ure_lock);
 
 		/* NIC reset */
@@ -4278,6 +4483,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	uint8_t eaddr[8];	/* 4-byte padded */
 	boolean_t was_running;
 	int ret;
+	int err;
 
 	switch (cmd) {
 	case DDI_ATTACH:
@@ -4303,6 +4509,13 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 		if (was_running) {
 			int error;
+
+			/* Clear PHY power-down before NIC reset */
+			if (ure_phy_powerup(sc) != 0) {
+				dev_err(dip, CE_WARN,
+				    "PHY powerup failed on resume");
+				return (DDI_SUCCESS);
+			}
 
 			mutex_enter(&sc->ure_lock);
 
@@ -4352,6 +4565,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	sc->ure_gone = B_FALSE;
 	sc->ure_running = B_FALSE;
 	sc->ure_link_state = LINK_STATE_UNKNOWN;
+	sc->ure_ocp_base = 0;
 
 	/* Read driver.conf tuneables */
 	sc->ure_hcksum_en = ddi_prop_get_int(DDI_DEV_T_ANY, dip,
@@ -4444,14 +4658,18 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	sc->ure_attach_seq |= URE_ATTACH_TX_CACHE;
 
 	/* Step 6: Read MAC address */
+	bzero(eaddr, sizeof (eaddr));
 	if (sc->ure_chip & (URE_CHIP_VER_4C00 |
 	    URE_CHIP_VER_4C10)) {
-		ure_read_mem(sc, URE_PLA_IDR, URE_MCU_TYPE_PLA,
+		err = ure_read_mem(sc, URE_PLA_IDR, URE_MCU_TYPE_PLA,
 		    eaddr, sizeof (eaddr));
-	}
-	else {
-		ure_read_mem(sc, URE_PLA_BACKUP,
+	} else {
+		err = ure_read_mem(sc, URE_PLA_BACKUP,
 		    URE_MCU_TYPE_PLA, eaddr, sizeof (eaddr));
+	}
+	if (err != USB_SUCCESS) {
+		dev_err(dip, CE_WARN, "failed to read MAC address");
+		goto fail;
 	}
 
 	bcopy(eaddr, sc->ure_dev_addr, ETHERADDRL);

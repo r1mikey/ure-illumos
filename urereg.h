@@ -157,6 +157,13 @@ extern "C" {
 #define	URE_PLA_PHYSTATUS	0xe908
 #define	URE_PLA_CONFIG6		0xe90a
 #define	URE_PLA_USB_CFG		0xe952
+#define	URE_PLA_ALDPS_STATUS	0xe000	/* ALDPS wait status */
+#define	URE_PLA_BYPASS_ALDPS	0xd3c8	/* bypass_turn_off_clk_in_aldps */
+#define	URE_PLA_BMU_0X2300	0x2300	/* BMU RX zero length */
+#define	URE_PLA_BMU_RX_IN	0x2350	/* BMU RX in reset */
+#define	URE_PLA_BMU_RX_OUT	0x2360	/* BMU RX out reset */
+#define	URE_PLA_BMU_TX_IN	0x2450	/* BMU TX in reset */
+#define	URE_PLA_BMU_TX_OUT	0x2460	/* BMU TX out reset */
 
 /* ------------------------------------------------------------------ */
 /* USB controller registers                                           */
@@ -210,6 +217,20 @@ extern "C" {
 #define	URE_USB_AFE_CTRL2	0xd824
 #define	URE_USB_UPS_FLAGS	0xd848
 #define	URE_USB_WDT11_CTRL	0xe43c
+#define	URE_USB_UNDOC_CFFE	0xcffe	/* undocumented USB register */
+#define	URE_USB_UNDOC_D3CA	0xd3ca	/* undocumented USB register */
+#define	URE_USB_INT_MITIGATION	0xcf04	/* interrupt mitigation */
+#define	URE_USB_UNDOC_D4AE	0xd4ae	/* undocumented USB register */
+#define	URE_USB_SDR_D378	0xd378	/* undocumented SDR register */
+#define	URE_USB_SDR_CD06	0xcd06	/* undocumented SDR register */
+#define	URE_USB_INT_MIT_MASK	0x87	/* bits to clear for mitigation */
+#define	URE_USB_RX_AGG_0X0400	0x0400	/* RTL8157 RX aggregation bit */
+#define	URE_OCP_PHY_0XA5B4	0xa5b4	/* undocumented PHY register */
+#define	URE_OCP_PHY_0XA5B4_DIS	0x8000	/* bit to clear in 0xa5b4 */
+#define	URE_PLA_BMU_0X2300_RZL	0x00000008	/* RX zero len bit */
+#define	URE_PLA_BMU_RESET_0X02	0x00000002	/* BMU reset bit */
+#define	URE_PLA_BMU_RESET_0X01	0x00000001	/* BMU enable bit */
+
 
 /* ------------------------------------------------------------------ */
 /* OCP (On-Chip Protocol) registers                                   */
@@ -318,7 +339,7 @@ extern "C" {
 #define	URE_CR_TE		0x04
 
 /* URE_PLA_CRWECR */
-#define	URE_CRWECR_NORAML	0x00
+#define	URE_CRWECR_NORMAL	0x00
 #define	URE_CRWECR_CONFIG	0xc0
 
 /* URE_PLA_OOB_CTRL */
@@ -733,6 +754,7 @@ typedef struct ure_txpkt_v2 {
 #define	URE_8156_TX_BUFSZ	32768
 #define	URE_8152_RX_BUFSZ	16384
 #define	URE_8153_RX_BUFSZ	32768
+/* Linux r8152 uses 48KB for 8156; OpenBSD uses 32KB for all variants. */
 #define	URE_8156_RX_BUFSZ	49152
 
 #ifdef __cplusplus

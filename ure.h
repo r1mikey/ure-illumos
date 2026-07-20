@@ -215,6 +215,9 @@ typedef struct ure_softc {
 	int			(*ure_phy_write)(struct ure_softc *,
 				    uint16_t, uint16_t);
 
+	/* OCP base register cache (0 = uncached) */
+	uint16_t		ure_ocp_base;
+
 	/* MAC address */
 	uint8_t			ure_dev_addr[ETHERADDRL];
 
@@ -251,6 +254,8 @@ typedef struct ure_softc {
 	uint64_t		ure_stat_opackets;
 	uint64_t		ure_stat_multircv;
 	uint64_t		ure_stat_brdcstrcv;
+	uint64_t		ure_stat_multixmt;
+	uint64_t		ure_stat_brdcstxmt;
 	uint64_t		ure_stat_norcvbuf;
 
 	/* Multicast hash (64-bit, CRC32-BE >> 26) */
