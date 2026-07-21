@@ -125,6 +125,10 @@
 /* Debug logging: set to 1 to enable verbose attach/detach logging */
 #define	URE_DEBUG	0
 
+static uint_t ure_errlevel = USB_LOG_L4;
+static uint_t ure_errmask = (uint_t)-1;
+static uint_t ure_instance_debug = (uint_t)-1;
+
 #if URE_DEBUG
 #define	URE_DPRINTF(sc, fmt, ...)	\
 	dev_err((sc)->ure_dip, CE_CONT, "?" fmt "\n", ##__VA_ARGS__)
@@ -4350,6 +4354,22 @@ ure_reconnect_cb(dev_info_t *dip)
 		return (DDI_SUCCESS);
 	}
 
+	if (usb_check_same_device(dip, sc->ure_lh, USB_LOG_L0, -1,
+	    USB_CHK_ALL, NULL) != USB_SUCCESS) {
+		mutex_enter(&sc->ure_lock);
+		sc->ure_gone = B_TRUE;
+		sc->ure_running = B_FALSE;
+		sc->ure_flags &= ~URE_FLAG_LINK;
+		sc->ure_link_state = LINK_STATE_DOWN;
+		mutex_exit(&sc->ure_lock);
+
+		if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
+			mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
+		}
+
+		return (DDI_SUCCESS);
+	}
+
 	mutex_enter(&sc->ure_lock);
 	sc->ure_gone = B_FALSE;
 	was_running = sc->ure_was_running;
@@ -4657,6 +4677,12 @@ ure_cleanup(ure_softc_t *sc)
 		usb_client_detach(sc->ure_dip, NULL);
 		sc->ure_attach_seq &= ~URE_ATTACH_USB;
 	}
+
+	if (sc->ure_attach_seq & URE_ATTACH_LOG) {
+		usb_free_log_hdl(sc->ure_lh);
+		sc->ure_lh = NULL;
+		sc->ure_attach_seq &= ~URE_ATTACH_LOG;
+	}
 }
 
 static int
@@ -4777,6 +4803,11 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	sc->ure_running = B_FALSE;
 	sc->ure_link_state = LINK_STATE_UNKNOWN;
 	sc->ure_ocp_base = 0;
+	sc->ure_lh = usb_alloc_log_hdl(dip, "ure", &ure_errlevel,
+	    &ure_errmask, &ure_instance_debug, 0);
+	if (sc->ure_lh != NULL) {
+		sc->ure_attach_seq |= URE_ATTACH_LOG;
+	}
 
 	/* Read driver.conf tuneables */
 	sc->ure_hcksum_en = ddi_prop_get_int(DDI_DEV_T_ANY, dip,

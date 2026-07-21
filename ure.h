@@ -78,6 +78,7 @@
 #include <sys/list.h>
 #include <sys/mac_provider.h>
 #include <sys/usb/usba.h>
+#include <sys/usb/usba/usbai_private.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -115,6 +116,7 @@ extern "C" {
 #define	URE_ATTACH_DEV_DATA	0x0002	/* usb_get_dev_data done */
 #define	URE_ATTACH_MUTEX	0x0004	/* mutexes initialised */
 #define	URE_ATTACH_CHIP_INIT	0x0008	/* chip init complete */
+#define	URE_ATTACH_LOG		0x0010	/* USB log handle allocated */
 #define	URE_ATTACH_MAC_REG	0x0020	/* mac_register done */
 #define	URE_ATTACH_USB_EVT	0x0040	/* usb event cbs registered */
 #define	URE_ATTACH_LINK_TIMER	0x0080	/* link poll timer running */
@@ -180,6 +182,7 @@ typedef struct ure_softc {
 	uint32_t		ure_attach_seq;
 
 	/* USB state */
+	usb_log_handle_t	ure_lh;
 	usb_client_dev_data_t	*ure_dev_data;
 	usb_pipe_handle_t	ure_def_pipe;
 	usb_pipe_handle_t	ure_bulkin_pipe;
