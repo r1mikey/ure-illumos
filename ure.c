@@ -191,6 +191,8 @@ static int	ure_set_rx_filter(ure_softc_t *);
 static int	ure_ifmedia_init(ure_softc_t *);
 static int	ure_get_link_status(ure_softc_t *, int *);
 static void	ure_link_check(void *);
+static void	ure_link_timer_start(ure_softc_t *);
+static void	ure_link_timer_stop(ure_softc_t *);
 
 static int	ure_disconnect_cb(dev_info_t *);
 static int	ure_reconnect_cb(dev_info_t *);
@@ -2783,6 +2785,34 @@ ure_link_check(void *arg)
 	mutex_exit(&sc->ure_tx_lock);
 }
 
+static void
+ure_link_timer_start(ure_softc_t *sc)
+{
+	if (sc->ure_attach_seq & URE_ATTACH_LINK_TIMER) {
+		return;
+	}
+
+	sc->ure_link_timer = ddi_periodic_add(
+	    ure_link_check, sc, 1000000000ULL, DDI_IPL_0);
+	sc->ure_attach_seq |= URE_ATTACH_LINK_TIMER;
+}
+
+static void
+ure_link_timer_stop(ure_softc_t *sc)
+{
+	ddi_periodic_t timer;
+
+	if ((sc->ure_attach_seq & URE_ATTACH_LINK_TIMER) == 0) {
+		return;
+	}
+
+	timer = sc->ure_link_timer;
+	sc->ure_link_timer = NULL;
+	sc->ure_attach_seq &= ~URE_ATTACH_LINK_TIMER;
+
+	ddi_periodic_delete(timer);
+}
+
 /*
  * RX filter (multicast hash, promisc)
  */
@@ -4580,10 +4610,7 @@ ure_chip_init(ure_softc_t *sc)
 static void
 ure_cleanup(ure_softc_t *sc)
 {
-	if (sc->ure_attach_seq & URE_ATTACH_LINK_TIMER) {
-		ddi_periodic_delete(sc->ure_link_timer);
-		sc->ure_attach_seq &= ~URE_ATTACH_LINK_TIMER;
-	}
+	ure_link_timer_stop(sc);
 
 	if (sc->ure_attach_seq & URE_ATTACH_USB_EVT) {
 		usb_unregister_event_cbs(sc->ure_dip, &ure_events);
@@ -4707,6 +4734,10 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			}
 
 			sc->ure_running = B_TRUE;
+			sc->ure_link_state = LINK_STATE_UNKNOWN;
+			sc->ure_link_speed = 0;
+			sc->ure_link_duplex = LINK_DUPLEX_UNKNOWN;
+			sc->ure_10gbt_stat = 0;
 
 			/* Restart RX */
 			ure_rx_start(sc);
@@ -4716,6 +4747,8 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			mac_link_update(sc->ure_mh,
 			    LINK_STATE_UNKNOWN);
 		}
+
+		ure_link_timer_start(sc);
 
 		return (DDI_SUCCESS);
 
@@ -4910,9 +4943,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
 
 	/* Step 10: Start link polling timer (1 second) */
-	sc->ure_link_timer = ddi_periodic_add(
-	    ure_link_check, sc, 1000000000ULL, DDI_IPL_0);
-	sc->ure_attach_seq |= URE_ATTACH_LINK_TIMER;
+	ure_link_timer_start(sc);
 
 	ddi_report_dev(dip);
 
@@ -4943,21 +4974,34 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		break;
 	case DDI_SUSPEND:
 		/*
-		 * Stop data paths first, then quiesce the hardware,
-		 * then mark the device gone.  ure_running = B_FALSE
-		 * is sufficient to stop new RX/TX activity and make
-		 * callbacks bail out.  ure_gone must remain B_FALSE
-		 * until after ure_reset() so that the register writes
-		 * inside ure_reset() can reach the device via
-		 * ure_ctl(), which returns USB_FAILURE immediately
-		 * when ure_gone is true.
+		 * Stop data paths first, stop link polling, then
+		 * quiesce the hardware and mark the device gone.
+		 * ure_running = B_FALSE is sufficient to stop new
+		 * RX/TX activity and make callbacks bail out.
+		 * ure_gone must remain B_FALSE until after
+		 * ure_reset() so that the register writes inside
+		 * ure_reset() can reach the device via ure_ctl(),
+		 * which returns USB_FAILURE immediately when
+		 * ure_gone is true.
 		 */
 		mutex_enter(&sc->ure_lock);
 		sc->ure_was_running = sc->ure_running;
 		sc->ure_running = B_FALSE;
 		sc->ure_flags &= ~URE_FLAG_LINK;
-		sc->ure_link_state = LINK_STATE_UNKNOWN;
 		mutex_exit(&sc->ure_lock);
+
+		ure_link_timer_stop(sc);
+
+		mutex_enter(&sc->ure_lock);
+		sc->ure_link_state = LINK_STATE_DOWN;
+		sc->ure_link_speed = 0;
+		sc->ure_link_duplex = LINK_DUPLEX_UNKNOWN;
+		sc->ure_10gbt_stat = 0;
+		mutex_exit(&sc->ure_lock);
+
+		if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
+			mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
+		}
 
 		/* Discard any pending coalescing buffer */
 		ure_txc_discard(sc);
