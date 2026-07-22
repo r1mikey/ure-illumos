@@ -147,6 +147,14 @@ static volatile int ure_rxcsum_debug = 0;
 static const uint8_t ure_bcast_addr[ETHERADDRL] =
 	{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
+typedef struct ure_tx_offload {
+	uint32_t	uto_opts1;
+	uint32_t	uto_opts2;
+	boolean_t	uto_sw_csum;
+	uint32_t	uto_sw_start;
+	uint32_t	uto_sw_stuff;
+} ure_tx_offload_t;
+
 /* Forward declarations */
 static int	ure_attach(dev_info_t *, ddi_attach_cmd_t);
 static int	ure_detach(dev_info_t *, ddi_detach_cmd_t);
@@ -172,7 +180,9 @@ static void	ure_tx_cb(usb_pipe_handle_t, usb_bulk_req_t *);
 static void	ure_txc_submit(ure_softc_t *, ure_tx_chain_t *);
 static void	ure_txc_flush_locked(ure_softc_t *);
 static boolean_t	ure_tx_offload(ure_softc_t *, mblk_t **,
-		    uint32_t *, uint32_t *);
+		    ure_tx_offload_t *);
+static boolean_t	ure_tx_sw_csum(const ure_tx_offload_t *, uchar_t *,
+		    uint32_t);
 static void	ure_txc_discard(ure_softc_t *);
 static void	ure_txc_timeout(void *);
 
@@ -3408,19 +3418,18 @@ ure_txc_timeout(void *arg)
  * before transmission.  This mutation requires contiguous access
  * to the IP header, so we pull up the necessary bytes first.
  *
- * Returns B_TRUE on success (opts1/opts2 filled, mp possibly
+ * Returns B_TRUE on success (offload state filled, mp possibly
  * reallocated via pullup).  Returns B_FALSE if the requested
- * hardware offload cannot be set up safely; caller should drop it.
+ * offload cannot be set up safely; caller should drop it.
  */
 static boolean_t
-ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
-    uint32_t *opts1p, uint32_t *opts2p)
+ure_tx_offload(ure_softc_t *sc, mblk_t **mpp, ure_tx_offload_t *ofl)
 {
 	mblk_t *mp = *mpp;
-	uint32_t opts1 = 0, opts2 = 0;
 	uint32_t mss_val, lso_flag;
 	mac_ether_offload_info_t meoi;
 
+	bzero(ofl, sizeof (*ofl));
 	mac_lso_get(mp, &mss_val, &lso_flag);
 
 	if (lso_flag == HW_LSO) {
@@ -3458,12 +3467,12 @@ ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
 			ipha_t *ipha = (ipha_t *)
 			    (mp->b_rptr + meoi.meoi_l2hlen);
 			ipha->ipha_length = 0;
-			opts1 |= URE_TXPKT_GTSENDV4;
+			ofl->uto_opts1 |= URE_TXPKT_GTSENDV4;
 		} else if (meoi.meoi_l3proto == ETHERTYPE_IPV6) {
 			ip6_t *ip6 = (ip6_t *)
 			    (mp->b_rptr + meoi.meoi_l2hlen);
 			ip6->ip6_plen = 0;
-			opts1 |= URE_TXPKT_GTSENDV6;
+			ofl->uto_opts1 |= URE_TXPKT_GTSENDV6;
 		} else {
 			return (B_FALSE);
 		}
@@ -3471,18 +3480,19 @@ ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
 		if (l4off > URE_TXPKT_GTTCPHO_MAX) {
 			return (B_FALSE);
 		}
-		opts1 |= l4off << URE_TXPKT_GTTCPHO_SHIFT;
-		opts2 = MIN(mss_val, URE_TXPKT_MSS_MAX) <<
+		ofl->uto_opts1 |= l4off << URE_TXPKT_GTTCPHO_SHIFT;
+		ofl->uto_opts2 = MIN(mss_val, URE_TXPKT_MSS_MAX) <<
 		    URE_TXPKT_MSS_SHIFT;
 	} else {
 		/*
 		 * Non-TSO checksum offload.
 		 */
-		uint32_t hck_flags;
-		mac_hcksum_get(mp, NULL, NULL, NULL, NULL, &hck_flags);
+		uint32_t hck_flags, hck_start, hck_stuff;
+		mac_hcksum_get(mp, &hck_start, &hck_stuff, NULL, NULL,
+		    &hck_flags);
 
 		if (hck_flags & HCK_IPV4_HDRCKSUM) {
-			opts2 |= URE_TXPKT_IPV4;
+			ofl->uto_opts2 |= URE_TXPKT_IPV4;
 		}
 		if (hck_flags & HCK_PARTIALCKSUM) {
 			mac_ether_offload_info(mp, &meoi);
@@ -3496,45 +3506,82 @@ ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
 			uint32_t l4off = meoi.meoi_l2hlen +
 			    meoi.meoi_l3hlen;
 			uint32_t l4max = URE_TXPKT_L4_OFFSET_MAX;
+			uint32_t mlen = msgsize(mp);
+			uint32_t sw_start = meoi.meoi_l2hlen + hck_start;
+			uint32_t sw_stuff = meoi.meoi_l2hlen + hck_stuff;
 
-			/*
-			 * Linux documents a smaller non-TSO checksum transport
-			 * offset field for RTL8157.  This only affects packets
-			 * where MAC asks for partial checksum offload and the
-			 * transport header starts beyond byte 0x3ff, which normal
-			 * Ethernet/IP/TCP or UDP packets do not approach.  The
-			 * driver has no per-packet software checksum fallback here,
-			 * so reject the packet rather than program an invalid
-			 * hardware descriptor.
-			 */
+			if (sw_start >= mlen || sw_stuff < sw_start ||
+			    sw_stuff > mlen ||
+			    mlen - sw_stuff < sizeof (uint16_t)) {
+				return (B_FALSE);
+			}
+
+			if (meoi.meoi_l3proto != ETHERTYPE_IP &&
+			    meoi.meoi_l3proto != ETHERTYPE_IPV6) {
+				return (B_FALSE);
+			}
+
+			if (meoi.meoi_l4proto != IPPROTO_TCP &&
+			    meoi.meoi_l4proto != IPPROTO_UDP) {
+				return (B_FALSE);
+			}
+
 			if (sc->ure_flags & URE_FLAG_8157) {
 				l4max = URE_TXPKT_V2_L4_OFFSET_MAX;
 			}
 			if (l4off > l4max) {
-				return (B_FALSE);
+				ofl->uto_sw_csum = B_TRUE;
+				ofl->uto_sw_start = sw_start;
+				ofl->uto_sw_stuff = sw_stuff;
+				return (B_TRUE);
 			}
 
 			if (meoi.meoi_l3proto == ETHERTYPE_IP) {
-				opts2 |= URE_TXPKT_IPV4;
-			} else if (meoi.meoi_l3proto ==
-			    ETHERTYPE_IPV6) {
-				opts2 |= URE_TXPKT_IPV6;
+				ofl->uto_opts2 |= URE_TXPKT_IPV4;
+			} else if (meoi.meoi_l3proto == ETHERTYPE_IPV6) {
+				ofl->uto_opts2 |= URE_TXPKT_IPV6;
 			}
 
 			if (meoi.meoi_l4proto == IPPROTO_TCP) {
-				opts2 |= URE_TXPKT_TCP;
-			} else if (meoi.meoi_l4proto ==
-			    IPPROTO_UDP) {
-				opts2 |= URE_TXPKT_UDP;
+				ofl->uto_opts2 |= URE_TXPKT_TCP;
+			} else {
+				ofl->uto_opts2 |= URE_TXPKT_UDP;
 			}
 
-			opts2 |= l4off <<
-			    URE_TXPKT_L4_OFFSET_SHIFT;
+			ofl->uto_opts2 |= l4off << URE_TXPKT_L4_OFFSET_SHIFT;
 		}
 	}
 
-	*opts1p = opts1;
-	*opts2p = opts2;
+	return (B_TRUE);
+}
+
+static boolean_t
+ure_tx_sw_csum(const ure_tx_offload_t *ofl, uchar_t *buf, uint32_t len)
+{
+	unsigned int sum;
+	uint16_t csum;
+
+	if (!ofl->uto_sw_csum) {
+		return (B_TRUE);
+	}
+
+	if (ofl->uto_sw_start >= len ||
+	    ofl->uto_sw_stuff < ofl->uto_sw_start ||
+	    ofl->uto_sw_stuff > len ||
+	    len - ofl->uto_sw_stuff < sizeof (csum)) {
+		return (B_FALSE);
+	}
+
+	sum = bcksum(buf + ofl->uto_sw_start,
+	    len - ofl->uto_sw_start, 0);
+	sum = (sum >> 16) + (sum & 0xffff);
+	sum = (sum >> 16) + (sum & 0xffff);
+	csum = (uint16_t)~sum;
+	if (csum == 0) {
+		csum = 0xffff;
+	}
+
+	bcopy(&csum, buf + ofl->uto_sw_stuff, sizeof (csum));
 	return (B_TRUE);
 }
 
@@ -3571,8 +3618,9 @@ ure_m_tx(void *arg, mblk_t *mp)
 
 	/* 2. Pack frames into the coalescing buffer */
 	while (mp != NULL) {
-		uint32_t mlen, aligned_pos;
+		uint32_t mlen, aligned_pos, data_pos;
 		unsigned char *buf;
+		ure_tx_offload_t ofl;
 
 		/* 2a. Ensure we have a coalescing buffer */
 		if (sc->ure_txc_chain == NULL) {
@@ -3626,21 +3674,17 @@ ure_m_tx(void *arg, mblk_t *mp)
 
 		/* 2c. Write TX header */
 		{
-			uint32_t ofl_opts1 = 0, ofl_opts2 = 0;
 			mblk_t *next = mp->b_next;
 			mp->b_next = NULL;
 
-			if (!ure_tx_offload(sc, &mp, &ofl_opts1,
-			    &ofl_opts2)) {
+			if (!ure_tx_offload(sc, &mp, &ofl)) {
 				/*
-				 * Hardware offload setup failed.  Drop the
-				 * packet rather than sending it with an invalid
-				 * descriptor.
+				 * Offload setup failed.  Drop the packet rather
+				 * than sending it with an invalid descriptor.
 				 */
 				freemsg(mp);
 				mp = next;
-				atomic_add_64(
-				    &sc->ure_stat_oerrors, 1);
+				atomic_add_64(&sc->ure_stat_oerrors, 1);
 				continue;
 			}
 			mp->b_next = next;
@@ -3657,8 +3701,8 @@ ure_m_tx(void *arg, mblk_t *mp)
 				bzero(&txhdr, sizeof (txhdr));
 				txhdr.ure_cmdstat = LE_32(mlen |
 				    URE_TXPKT_TX_FS |
-				    URE_TXPKT_TX_LS | ofl_opts1);
-				txhdr.ure_vlan = LE_32(ofl_opts2);
+				    URE_TXPKT_TX_LS | ofl.uto_opts1);
+				txhdr.ure_vlan = LE_32(ofl.uto_opts2);
 				txhdr.ure_pktlen =
 				    LE_32(mlen << 4);
 				txhdr.ure_signature = LE_32(
@@ -3672,14 +3716,15 @@ ure_m_tx(void *arg, mblk_t *mp)
 				bzero(&txhdr, sizeof (txhdr));
 				txhdr.ure_pktlen = LE_32(mlen |
 				    URE_TXPKT_TX_FS |
-				    URE_TXPKT_TX_LS | ofl_opts1);
-				txhdr.ure_vlan = LE_32(ofl_opts2);
+				    URE_TXPKT_TX_LS | ofl.uto_opts1);
+				txhdr.ure_vlan = LE_32(ofl.uto_opts2);
 				bcopy(&txhdr,
 				    buf + sc->ure_txc_pos,
 				    sizeof (txhdr));
 			}
 		}
 		sc->ure_txc_pos += hdrsize;
+		data_pos = sc->ure_txc_pos;
 
 		/* 2d. Copy packet data */
 		{
@@ -3692,6 +3737,16 @@ ure_m_tx(void *arg, mblk_t *mp)
 					sc->ure_txc_pos += len;
 				}
 			}
+		}
+
+		if (!ure_tx_sw_csum(&ofl, buf + data_pos, mlen)) {
+			mblk_t *next = mp->b_next;
+			sc->ure_txc_pos = aligned_pos;
+			mp->b_next = NULL;
+			freemsg(mp);
+			mp = next;
+			atomic_add_64(&sc->ure_stat_oerrors, 1);
+			continue;
 		}
 
 		sc->ure_txc_chain->uc_npkts++;
