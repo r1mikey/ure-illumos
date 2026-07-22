@@ -4707,6 +4707,27 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			return (DDI_FAILURE);
 		}
 
+		/*
+		 * Treat resume like reconnect.  Before allowing register
+		 * access again, make sure CPR has not resumed with a
+		 * different device on the port.
+		 */
+		if (usb_check_same_device(dip, sc->ure_lh, USB_LOG_L0, -1,
+		    USB_CHK_ALL, NULL) != USB_SUCCESS) {
+			mutex_enter(&sc->ure_lock);
+			sc->ure_gone = B_TRUE;
+			sc->ure_running = B_FALSE;
+			sc->ure_flags &= ~URE_FLAG_LINK;
+			sc->ure_link_state = LINK_STATE_DOWN;
+			mutex_exit(&sc->ure_lock);
+
+			if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
+				mac_link_update(sc->ure_mh, LINK_STATE_DOWN);
+			}
+
+			return (DDI_SUCCESS);
+		}
+
 		mutex_enter(&sc->ure_lock);
 		sc->ure_gone = B_FALSE;
 		was_running = sc->ure_was_running;
