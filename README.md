@@ -183,6 +183,18 @@ RTL8156/8156B/8157 operate at 2.5G/5G which the MII framework has no
 support for.  MII integration would only cover the 8152/8153 and would
 not add meaningful functionality beyond what the driver already provides.
 
+### Quiesce
+
+The driver does not provide a quiesce callback.  All chip register access
+goes through USB control transfers, and quiesce may run after other CPUs
+have been stopped and at a raised interrupt priority.  In that context a
+USB request that waits for host-controller progress is not safe.  The
+normal stop, detach, suspend and disconnect paths already reset or stop
+the device in contexts where sleeping USB operations are valid.  A useful
+quiesce implementation would need a USB path that can complete without
+blocking on normal USBA callbacks, so the driver declares that no separate
+quiesce action is needed instead of trying a best-effort register write.
+
 Hardware VLAN tag insert/strip is not used.  The chips support out-of-band
 VLAN tagging via the RX/TX packet header VLAN fields (FreeBSD uses this
 with its M_VLANTAG mbuf mechanism), but the illumos MAC framework has no

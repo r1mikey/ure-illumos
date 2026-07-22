@@ -150,7 +150,6 @@ static const uint8_t ure_bcast_addr[ETHERADDRL] =
 /* Forward declarations */
 static int	ure_attach(dev_info_t *, ddi_attach_cmd_t);
 static int	ure_detach(dev_info_t *, ddi_detach_cmd_t);
-static int	ure_quiesce(dev_info_t *);
 
 static int	ure_m_stat(void *, uint_t, uint64_t *);
 static int	ure_m_start(void *);
@@ -294,7 +293,7 @@ DDI_DEFINE_STREAM_OPS(
 	/* XXgetinfo */		NULL,
 	/* XXflag */		D_MP,
 	/* XXstream_tab */	NULL,
-	/* XXquiesce */		ure_quiesce
+	/* XXquiesce */		ddi_quiesce_not_needed
 );
 
 static struct modldrv ure_modldrv = {
@@ -5107,44 +5106,6 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 
 	ure_cleanup(sc);
 	ddi_soft_state_free(ure_statep, instance);
-
-	return (DDI_SUCCESS);
-}
-
-
-/*
- * Best-effort quiesce for fast reboot and panic.  USB control transfers
- * require a working interrupt pipeline, which may not be available in
- * this context, so every write here is best-effort.  We try to stop
- * the MAC and power down the PHY; if the USB transfer fails silently,
- * at least we tried.
- */
-static int
-ure_quiesce(dev_info_t *dip)
-{
-	ure_softc_t *sc;
-	uint16_t val;
-	int instance = ddi_get_instance(dip);
-
-	sc = ddi_get_soft_state(ure_statep, instance);
-	if (sc == NULL) {
-		return (DDI_SUCCESS);
-	}
-
-	/* Stop MAC RX/TX */
-	(void) ure_write_1(sc, URE_PLA_CR, URE_MCU_TYPE_PLA, 0);
-
-	/* Power down PHY */
-	if (ure_phy_read(sc, URE_OCP_BMCR, &val) == USB_SUCCESS) {
-		(void) ure_phy_write(sc, URE_OCP_BMCR,
-		    val | URE_OCP_BMCR_PDOWN);
-	}
-
-	/*
-	 * Mark gone only after the best-effort register writes above
-	 * have had their chance to reach the device.
-	 */
-	sc->ure_gone = B_TRUE;
 
 	return (DDI_SUCCESS);
 }
