@@ -178,6 +178,7 @@ static void	ure_txc_discard(ure_softc_t *);
 static void	ure_txc_timeout(void *);
 
 static int	ure_chip_init(ure_softc_t *);
+static void	ure_chip_uninit(ure_softc_t *);
 static int	ure_rtl8152_init(ure_softc_t *);
 static int	ure_rtl8153_init(ure_softc_t *);
 static int	ure_rtl8153b_init(ure_softc_t *);
@@ -4624,6 +4625,17 @@ ure_chip_init(ure_softc_t *sc)
 	return (USB_SUCCESS);
 }
 
+static void
+ure_chip_uninit(ure_softc_t *sc __unused)
+{
+	/*
+	 * Chip-specific detach-time teardown belongs here.  The current
+	 * chip initialisation paths only program hardware state and do not
+	 * allocate chip-specific software resources, so there is nothing to
+	 * undo at present.
+	 */
+}
+
 /*
  * Attach / Detach
  */
@@ -4641,6 +4653,11 @@ ure_cleanup(ure_softc_t *sc)
 	if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
 		(void) mac_unregister(sc->ure_mh);
 		sc->ure_attach_seq &= ~URE_ATTACH_MAC_REG;
+	}
+
+	if (sc->ure_attach_seq & URE_ATTACH_CHIP_INIT) {
+		ure_chip_uninit(sc);
+		sc->ure_attach_seq &= ~URE_ATTACH_CHIP_INIT;
 	}
 
 	ure_close_pipes(sc);
