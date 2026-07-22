@@ -183,6 +183,22 @@ RTL8156/8156B/8157 operate at 2.5G/5G which the MII framework has no
 support for.  MII integration would only cover the 8152/8153 and would
 not add meaningful functionality beyond what the driver already provides.
 
+### TX checksum offload caveat
+
+For RTL8157, non-TSO TX checksum offload is rejected when the transport
+header starts beyond byte 0x3ff from the start of the Ethernet frame.
+This follows the smaller RTL8157 checksum-offset field used by Linux.
+Ordinary IPv4/IPv6 TCP or UDP packets are far below this limit.  It can
+only be reached when MAC requests partial checksum offload for a packet
+with unusually large L2 plus L3 headers, for example a packet with many
+or very large encapsulation or extension headers.  The current TX path
+has no per-packet software checksum fallback, so such a packet is dropped
+and counted as an output error rather than sent with an invalid hardware
+descriptor.
+
+TSO uses a separate transport-offset field and is not changed by this
+limit.
+
 ### Quiesce
 
 The driver does not provide a quiesce callback.  All chip register access

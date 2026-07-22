@@ -3409,8 +3409,8 @@ ure_txc_timeout(void *arg)
  * to the IP header, so we pull up the necessary bytes first.
  *
  * Returns B_TRUE on success (opts1/opts2 filled, mp possibly
- * reallocated via pullup).  Returns B_FALSE if TSO was requested
- * but the packet cannot be set up safely; caller should drop it.
+ * reallocated via pullup).  Returns B_FALSE if the requested
+ * hardware offload cannot be set up safely; caller should drop it.
  */
 static boolean_t
 ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
@@ -3495,8 +3495,22 @@ ure_tx_offload(ure_softc_t *sc, mblk_t **mpp,
 
 			uint32_t l4off = meoi.meoi_l2hlen +
 			    meoi.meoi_l3hlen;
+			uint32_t l4max = URE_TXPKT_L4_OFFSET_MAX;
 
-			if (l4off > URE_TXPKT_L4_OFFSET_MAX) {
+			/*
+			 * Linux documents a smaller non-TSO checksum transport
+			 * offset field for RTL8157.  This only affects packets
+			 * where MAC asks for partial checksum offload and the
+			 * transport header starts beyond byte 0x3ff, which normal
+			 * Ethernet/IP/TCP or UDP packets do not approach.  The
+			 * driver has no per-packet software checksum fallback here,
+			 * so reject the packet rather than program an invalid
+			 * hardware descriptor.
+			 */
+			if (sc->ure_flags & URE_FLAG_8157) {
+				l4max = URE_TXPKT_V2_L4_OFFSET_MAX;
+			}
+			if (l4off > l4max) {
 				return (B_FALSE);
 			}
 
@@ -3619,9 +3633,9 @@ ure_m_tx(void *arg, mblk_t *mp)
 			if (!ure_tx_offload(sc, &mp, &ofl_opts1,
 			    &ofl_opts2)) {
 				/*
-				 * TSO setup failed (pullup or
-				 * unsupported protocol).  Drop the
-				 * unsegmented packet.
+				 * Hardware offload setup failed.  Drop the
+				 * packet rather than sending it with an invalid
+				 * descriptor.
 				 */
 				freemsg(mp);
 				mp = next;

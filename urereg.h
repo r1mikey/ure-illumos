@@ -699,6 +699,7 @@ typedef struct ure_txpkt {
 #define	URE_TXPKT_VLAN_TAG	(1U << 16)
 #define	URE_TXPKT_L4_OFFSET_SHIFT	17
 #define	URE_TXPKT_L4_OFFSET_MAX	0x7ff
+#define	URE_TXPKT_V2_L4_OFFSET_MAX	0x3ffU
 
 /* TX TSO descriptor bits (opts1) */
 #define	URE_TXPKT_GTSENDV4	(1U << 28)	/* TSO IPv4 */
