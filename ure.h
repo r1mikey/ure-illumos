@@ -1,4 +1,4 @@
-/*      $OpenBSD: if_ure.c,v 1.37 2025/06/04 00:06:17 jsg Exp $ */
+/*	$OpenBSD: if_ure.c,v 1.37 2025/06/04 00:06:17 jsg Exp $	*/
 /*-
  * Copyright (c) 2015, 2016, 2019 Kevin Lo <kevlo@openbsd.org>
  * Copyright (c) 2020 Jonathon Fletcher <jonathon.fletcher@gmail.com>
@@ -268,9 +268,6 @@ typedef struct ure_softc {
 	list_t			ure_mcast_list;
 
 } ure_softc_t;
-
-
-
 
 #ifdef __cplusplus
 }
