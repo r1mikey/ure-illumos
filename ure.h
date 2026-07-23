@@ -107,6 +107,7 @@ extern "C" {
 #define	URE_CHIP_VER_5C30	0x0020
 #define	URE_CHIP_VER_6010	0x0040
 #define	URE_CHIP_VER_7420	0x0080
+#define	URE_CHIP_VER_7400	0x0100
 
 /*
  * Attach sequence tracking: each bit indicates a resource that
@@ -167,6 +168,9 @@ typedef struct ure_tx_chain {
  *                 bulk USB I/O.
  *   ure_tx_lock - protects ure_tx_cnt and ure_tx_watchdog.
  *                 Brief hold; never held simultaneously with ure_lock.
+ *   ure_txc_lock - protects TX coalescing state: ure_txc_chain,
+ *                  ure_txc_pos, ure_txc_tid.  Never held simultaneously
+ *                  with ure_lock or ure_tx_lock.
  *
  * RX aggregation buffer parsing and mac_rx() upcalls run inline in
  * the USBA bulk-IN callback.  usb_pipe_reset with USB_FLAGS_SLEEP

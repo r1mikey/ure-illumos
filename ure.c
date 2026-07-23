@@ -204,7 +204,6 @@ static int	ure_phy_powerup(ure_softc_t *);
 static int	ure_rxvlan(ure_softc_t *);
 static int	ure_set_rx_filter(ure_softc_t *);
 static int	ure_ifmedia_init(ure_softc_t *);
-static int	ure_get_link_status(ure_softc_t *, int *);
 static void	ure_link_check(void *);
 static void	ure_link_timer_start(ure_softc_t *);
 static void	ure_link_timer_stop(ure_softc_t *);
@@ -887,6 +886,12 @@ ure_rtl8157_ocp_reg_write(ure_softc_t *sc, uint16_t addr,
 		 * The register write was sent to the device but the
 		 * TGPHY busy flag did not clear.  This can be transient,
 		 * so log and continue rather than aborting init.
+		 *
+		 * Unlike ure_rtl8157_ocp_reg_read, which returns
+		 * USB_FAILURE on timeout (no data to trust), writes
+		 * return USB_SUCCESS here because the data was already
+		 * dispatched via USB control transfers; only the
+		 * completion poll timed out.
 		 */
 		dev_err(sc->ure_dip, CE_WARN, "PHY write timeout");
 	}
@@ -1467,14 +1472,22 @@ ure_rtl8153_init(ure_softc_t *sc)
 	 * to avoid link instability and spontaneous disconnects.
 	 * This matches OpenBSD.
 	 */
-	(void) ure_write_2(sc, URE_PLA_MAC_PWR_CTRL,
-	    URE_MCU_TYPE_PLA, 0);
-	(void) ure_write_2(sc, URE_PLA_MAC_PWR_CTRL2,
-	    URE_MCU_TYPE_PLA, 0);
-	(void) ure_write_2(sc, URE_PLA_MAC_PWR_CTRL3,
-	    URE_MCU_TYPE_PLA, 0);
-	(void) ure_write_2(sc, URE_PLA_MAC_PWR_CTRL4,
-	    URE_MCU_TYPE_PLA, 0);
+	if ((err = ure_write_2(sc, URE_PLA_MAC_PWR_CTRL,
+	    URE_MCU_TYPE_PLA, 0)) != USB_SUCCESS) {
+		return (err);
+	}
+	if ((err = ure_write_2(sc, URE_PLA_MAC_PWR_CTRL2,
+	    URE_MCU_TYPE_PLA, 0)) != USB_SUCCESS) {
+		return (err);
+	}
+	if ((err = ure_write_2(sc, URE_PLA_MAC_PWR_CTRL3,
+	    URE_MCU_TYPE_PLA, 0)) != USB_SUCCESS) {
+		return (err);
+	}
+	if ((err = ure_write_2(sc, URE_PLA_MAC_PWR_CTRL4,
+	    URE_MCU_TYPE_PLA, 0)) != USB_SUCCESS) {
+		return (err);
+	}
 
 	/* Enable Rx aggregation */
 	if ((err = ure_clrbit_2(sc, URE_USB_USB_CTRL,
@@ -1556,6 +1569,59 @@ ure_rtl8153b_init(ure_softc_t *sc)
 	    &reg)) != 0) {
 		return (err);
 	}
+
+	/*
+	 * If the PHY reports EXT_INIT, clear firmware-internal
+	 * initialization bits before proceeding.  Matches FreeBSD.
+	 * OCP 0xa468 and 0xa466 are undocumented Realtek PHY
+	 * registers used during extended initialization.
+	 */
+	if ((reg == URE_PHY_STAT_EXT_INIT) &&
+	    (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B))) {
+		uint16_t tmp;
+
+		if ((err = ure_phy_read(sc, 0xa468, &tmp)) != 0) {
+			return (err);
+		}
+		if ((err = ure_phy_write(sc, 0xa468,
+		    tmp & ~0x000a)) != 0) {
+			return (err);
+		}
+		if (sc->ure_flags & URE_FLAG_8156B) {
+			if ((err = ure_phy_read(sc, 0xa466,
+			    &tmp)) != 0) {
+				return (err);
+			}
+			if ((err = ure_phy_write(sc, 0xa466,
+			    tmp & ~0x0001)) != 0) {
+				return (err);
+			}
+		}
+	}
+
+	/*
+	 * Clear BMCR PDOWN if firmware left the PHY powered down.
+	 * Some firmware versions leave this set after initialization;
+	 * without clearing it the link never comes up.  Matches
+	 * FreeBSD.  The resume path calls ure_phy_powerup() which
+	 * also clears PDOWN, but this covers the initial attach.
+	 */
+	{
+		uint16_t bmcr;
+
+		if ((err = ure_phy_read(sc, URE_OCP_BMCR,
+		    &bmcr)) != 0) {
+			return (err);
+		}
+		if (bmcr & URE_OCP_BMCR_PDOWN) {
+			bmcr &= ~URE_OCP_BMCR_PDOWN;
+			if ((err = ure_phy_write(sc, URE_OCP_BMCR,
+			    bmcr)) != 0) {
+				return (err);
+			}
+		}
+	}
+
 	(void) ure_rtl8153_phy_status(sc, URE_PHY_STAT_LAN_ON, &reg);
 
 	if ((err = ure_clrbit_2(sc, URE_USB_U2P3_CTRL,
@@ -2220,6 +2286,10 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 			break;
 		}
 	}
+	if (i == 20) {
+		dev_err(sc->ure_dip, CE_WARN,
+		    "timeout waiting for ALDPS idle");
+	}
 
 	if ((err = ure_setbit_2(sc, URE_PLA_MISC_1, URE_MCU_TYPE_PLA,
 	    URE_RXDY_GATED_EN)) != USB_SUCCESS) {
@@ -2633,22 +2703,6 @@ ure_ifmedia_init(ure_softc_t *sc)
 	return (USB_SUCCESS);
 }
 
-static int
-ure_get_link_status(ure_softc_t *sc, int *statusp)
-{
-	int err;
-	uint16_t val;
-
-	if ((err = ure_read_2(sc, URE_PLA_PHYSTATUS, URE_MCU_TYPE_PLA,
-	    &val)) != USB_SUCCESS) {
-		return (err);
-	}
-
-	*statusp = (val & URE_PHYSTATUS_LINK) ? 1 : 0;
-
-	return (USB_SUCCESS);
-}
-
 /*
  * Periodic link status check, called via ddi_periodic_add.
  * Includes FreeBSD spurious link-down workaround (PR 252165):
@@ -2664,7 +2718,6 @@ ure_link_check(void *arg)
 	link_duplex_t duplex = LINK_DUPLEX_UNKNOWN;
 	uint16_t status;
 	uint16_t ocp_val = 0;
-	int link_status;
 	boolean_t link_changed;
 
 	if (sc->ure_gone) {
@@ -2678,17 +2731,19 @@ ure_link_check(void *arg)
 	}
 	mutex_exit(&sc->ure_lock);
 
-	/* All USB I/O below runs without ure_lock held */
-	if (ure_get_link_status(sc, &link_status) != USB_SUCCESS) {
+	/*
+	 * Read PHYSTATUS once for both link detection and speed/duplex.
+	 * Two separate reads would create a TOCTOU window where a
+	 * link change between reads could produce an inconsistent
+	 * snapshot.  All USB I/O runs without ure_lock held.
+	 */
+	if (ure_read_2(sc, URE_PLA_PHYSTATUS, URE_MCU_TYPE_PLA,
+	    &status) != USB_SUCCESS) {
 		return;
 	}
 
-	if (link_status) {
+	if (status & URE_PHYSTATUS_LINK) {
 		new_link = LINK_STATE_UP;
-		if (ure_read_2(sc, URE_PLA_PHYSTATUS,
-		    URE_MCU_TYPE_PLA, &status) != USB_SUCCESS) {
-			return;
-		}
 
 		if (ure_has_5000fdx(sc) &&
 		    (status & URE_PHYSTATUS_5000MBPS)) {
@@ -2762,7 +2817,7 @@ ure_link_check(void *arg)
 		return;
 	}
 
-	if (link_status) {
+	if (status & URE_PHYSTATUS_LINK) {
 		sc->ure_flags |= URE_FLAG_LINK;
 		if (ure_has_2500fdx(sc)) {
 			sc->ure_10gbt_stat = ocp_val;
@@ -3998,15 +4053,20 @@ static int
 ure_m_promisc(void *arg, boolean_t on)
 {
 	ure_softc_t *sc = (ure_softc_t *)arg;
+	boolean_t old_promisc;
 	boolean_t running;
 
 	mutex_enter(&sc->ure_lock);
+	old_promisc = sc->ure_promisc;
 	sc->ure_promisc = on;
 	running = sc->ure_running;
 	mutex_exit(&sc->ure_lock);
 
 	if (running) {
 		if (ure_set_rx_filter(sc) != 0) {
+			mutex_enter(&sc->ure_lock);
+			sc->ure_promisc = old_promisc;
+			mutex_exit(&sc->ure_lock);
 			return (EIO);
 		}
 	}
@@ -4129,10 +4189,12 @@ static int
 ure_m_unicst(void *arg, const uint8_t *macaddr)
 {
 	ure_softc_t *sc = (ure_softc_t *)arg;
+	uint8_t old_addr[ETHERADDRL];
 	boolean_t running;
 	int err = 0;
 
 	mutex_enter(&sc->ure_lock);
+	bcopy(sc->ure_dev_addr, old_addr, ETHERADDRL);
 	bcopy(macaddr, sc->ure_dev_addr, ETHERADDRL);
 	running = sc->ure_running;
 	mutex_exit(&sc->ure_lock);
@@ -4156,6 +4218,12 @@ ure_m_unicst(void *arg, const uint8_t *macaddr)
 				err = EIO;
 			}
 		}
+	}
+
+	if (err != 0) {
+		mutex_enter(&sc->ure_lock);
+		bcopy(old_addr, sc->ure_dev_addr, ETHERADDRL);
+		mutex_exit(&sc->ure_lock);
 	}
 
 	return (err);
@@ -4484,6 +4552,14 @@ ure_reconnect_cb(dev_info_t *dip)
 	sc->ure_was_running = B_FALSE;
 	mutex_exit(&sc->ure_lock);
 
+	/* Refresh bulk pipe handles after bus reset */
+	ure_close_pipes(sc);
+	if (ure_open_pipes(sc) != DDI_SUCCESS) {
+		dev_err(sc->ure_dip, CE_WARN,
+		    "pipe open failed on reconnect");
+		goto reconn_fail;
+	}
+
 	/* Re-initialise chip */
 	if (ure_chip_init(sc) != 0) {
 		dev_err(sc->ure_dip, CE_WARN,
@@ -4542,6 +4618,7 @@ ure_reconnect_cb(dev_info_t *dip)
 	return (DDI_SUCCESS);
 
 reconn_fail:
+	(void) ure_phy_powerdown(sc);
 	mutex_enter(&sc->ure_lock);
 	sc->ure_gone = B_TRUE;
 	mutex_exit(&sc->ure_lock);
@@ -4563,6 +4640,7 @@ ure_chip_init(ure_softc_t *sc)
 
 	sc->ure_chip = 0;
 	sc->ure_flags = 0;
+	sc->ure_ocp_base = 0;
 
 	sc->ure_phy_read = ure_ocp_reg_read;
 	sc->ure_phy_write = ure_ocp_reg_write;
@@ -4655,6 +4733,14 @@ ure_chip_init(ure_softc_t *sc)
 		sc->ure_rxbufsz = URE_8156_RX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8156 (0x%04x)\n", ver);
+		break;
+	case 0x7400:
+		sc->ure_flags = URE_FLAG_8156B;
+		sc->ure_chip |= URE_CHIP_VER_7400;
+		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
+		sc->ure_rxbufsz = URE_8156_RX_BUFSZ;
+		dev_err(sc->ure_dip, CE_CONT,
+		    "?RTL8156B (0x%04x)\n", ver);
 		break;
 	case 0x7410:
 		sc->ure_flags = URE_FLAG_8156B;
@@ -4852,6 +4938,14 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		sc->ure_was_running = B_FALSE;
 		mutex_exit(&sc->ure_lock);
 
+		/* Refresh bulk pipe handles after suspend/resume cycle */
+		ure_close_pipes(sc);
+		if (ure_open_pipes(sc) != DDI_SUCCESS) {
+			dev_err(dip, CE_WARN,
+			    "pipe open failed on resume");
+			goto resume_fail;
+		}
+
 		/* Reinitialise chip variant registers */
 		if (ure_chip_init(sc) != 0) {
 			dev_err(dip, CE_WARN,
@@ -4914,6 +5008,7 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		return (DDI_SUCCESS);
 
 	resume_fail:
+		(void) ure_phy_powerdown(sc);
 		mutex_enter(&sc->ure_lock);
 		sc->ure_gone = B_TRUE;
 		mutex_exit(&sc->ure_lock);
