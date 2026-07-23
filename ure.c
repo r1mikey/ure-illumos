@@ -1080,6 +1080,13 @@ ure_reset(ure_softc_t *sc)
 			    "reset never completed");
 			return (USB_FAILURE);
 		}
+		/*
+		 * PLA_CR_RST clears all PLA registers including
+		 * PLA_OCP_GPHY_BASE, so invalidate the cached
+		 * OCP base to force the next PHY access to
+		 * reprogram it.
+		 */
+		sc->ure_ocp_base = 0;
 	}
 	return (USB_SUCCESS);
 }
@@ -2019,6 +2026,9 @@ ure_rtl8152_nic_reset(ure_softc_t *sc)
 	int err;
 	int i;
 
+	/* Invalidate OCP base cache; ure_reset() clears PLA registers */
+	sc->ure_ocp_base = 0;
+
 	/* Disable ALDPS */
 	if ((err = ure_ocp_reg_write(sc, URE_OCP_ALDPS_CONFIG,
 	    URE_ENPDNPS | URE_LINKENA | URE_DIS_SDSAVE)) != USB_SUCCESS) {
@@ -2163,6 +2173,9 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 	uint8_t val8;
 	int i;
 	int err;
+
+	/* Invalidate OCP base cache; ure_reset() clears PLA registers */
+	sc->ure_ocp_base = 0;
 
 	switch (sc->ure_flags & URE_FLAG_CHIP_MASK) {
 	case URE_FLAG_8153B:
@@ -2631,13 +2644,7 @@ ure_get_link_status(ure_softc_t *sc, int *statusp)
 		return (err);
 	}
 
-	if (val & URE_PHYSTATUS_LINK) {
-		sc->ure_flags |= URE_FLAG_LINK;
-		*statusp = 1;
-	} else {
-		sc->ure_flags &= ~URE_FLAG_LINK;
-		*statusp = 0;
-	}
+	*statusp = (val & URE_PHYSTATUS_LINK) ? 1 : 0;
 
 	return (USB_SUCCESS);
 }
@@ -2656,21 +2663,23 @@ ure_link_check(void *arg)
 	uint64_t speed = 0;
 	link_duplex_t duplex = LINK_DUPLEX_UNKNOWN;
 	uint16_t status;
+	uint16_t ocp_val = 0;
 	int link_status;
+	boolean_t link_changed;
 
 	if (sc->ure_gone) {
 		return;
 	}
 
 	mutex_enter(&sc->ure_lock);
-
 	if (!sc->ure_running) {
 		mutex_exit(&sc->ure_lock);
 		return;
 	}
+	mutex_exit(&sc->ure_lock);
 
+	/* All USB I/O below runs without ure_lock held */
 	if (ure_get_link_status(sc, &link_status) != USB_SUCCESS) {
-		mutex_exit(&sc->ure_lock);
 		return;
 	}
 
@@ -2678,7 +2687,6 @@ ure_link_check(void *arg)
 		new_link = LINK_STATE_UP;
 		if (ure_read_2(sc, URE_PLA_PHYSTATUS,
 		    URE_MCU_TYPE_PLA, &status) != USB_SUCCESS) {
-			mutex_exit(&sc->ure_lock);
 			return;
 		}
 
@@ -2709,20 +2717,15 @@ ure_link_check(void *arg)
 		 * 10GBASE-T AN status register.
 		 */
 		if (ure_has_2500fdx(sc)) {
-			uint16_t ocp_val;
-
 			if (ure_ocp_reg_read(sc, URE_OCP_10GBT_STAT,
 			    &ocp_val) != USB_SUCCESS) {
-				mutex_exit(&sc->ure_lock);
 				return;
 			}
-			sc->ure_10gbt_stat = ocp_val;
 		}
 
 		/* Re-enable TX/RX on link up */
 		if (ure_setbit_1(sc, URE_PLA_CR, URE_MCU_TYPE_PLA,
 		    URE_CR_RE | URE_CR_TE) != USB_SUCCESS) {
-			mutex_exit(&sc->ure_lock);
 			return;
 		}
 	} else {
@@ -2736,38 +2739,56 @@ ure_link_check(void *arg)
 		if (ure_ocp_reg_read(sc,
 		    URE_OCP_BASE_MII + 0x02,
 		    &bmsr) != USB_SUCCESS) {	/* MII_BMSR */
-			mutex_exit(&sc->ure_lock);
 			return;
 		}
 		if (ure_ocp_reg_read(sc,
 		    URE_OCP_BASE_MII + 0x02,
 		    &bmsr) != USB_SUCCESS) {
-			mutex_exit(&sc->ure_lock);
 			return;
 		}
 
 		if (bmsr & 0x0004) {	/* BMSR_LINK */
 			/* PHY still has link, spurious */
 			new_link = LINK_STATE_UP;
-			/* Keep previous speed/duplex */
+		} else {
+			new_link = LINK_STATE_DOWN;
+		}
+	}
+
+	/* Reacquire lock to update cached link state */
+	mutex_enter(&sc->ure_lock);
+	if (!sc->ure_running || sc->ure_gone) {
+		mutex_exit(&sc->ure_lock);
+		return;
+	}
+
+	if (link_status) {
+		sc->ure_flags |= URE_FLAG_LINK;
+		if (ure_has_2500fdx(sc)) {
+			sc->ure_10gbt_stat = ocp_val;
+		}
+	} else {
+		sc->ure_flags &= ~URE_FLAG_LINK;
+		if (new_link == LINK_STATE_UP) {
+			/* Spurious down - keep previous speed/duplex */
 			speed = sc->ure_link_speed;
 			duplex = sc->ure_link_duplex;
 		} else {
-			new_link = LINK_STATE_DOWN;
 			sc->ure_10gbt_stat = 0;
 		}
 	}
 
-	if (new_link != sc->ure_link_state ||
-	    speed != sc->ure_link_speed) {
+	link_changed = (new_link != sc->ure_link_state ||
+	    speed != sc->ure_link_speed);
+	if (link_changed) {
 		sc->ure_link_state = new_link;
 		sc->ure_link_speed = speed;
 		sc->ure_link_duplex = duplex;
-		mutex_exit(&sc->ure_lock);
+	}
+	mutex_exit(&sc->ure_lock);
 
+	if (link_changed) {
 		mac_link_update(sc->ure_mh, new_link);
-	} else {
-		mutex_exit(&sc->ure_lock);
 	}
 
 	/*
@@ -2837,8 +2858,6 @@ ure_set_rx_filter(ure_softc_t *sc)
 {
 	uint32_t rxmode;
 	uint32_t hashes[2];
-
-	ASSERT(MUTEX_HELD(&sc->ure_lock));
 
 	if (ure_read_4(sc, URE_PLA_RCR, URE_MCU_TYPE_PLA, &rxmode) !=
 	    USB_SUCCESS) {
@@ -2912,8 +2931,8 @@ ure_rx_start(ure_softc_t *sc)
 
 		sc->ure_rx_cnt++;
 
-		if (usb_pipe_bulk_xfer(sc->ure_bulkin_pipe, req, 0) !=
-		    USB_SUCCESS) {
+		if (usb_pipe_bulk_xfer(sc->ure_bulkin_pipe, req,
+		    USB_FLAGS_NOSLEEP) != USB_SUCCESS) {
 			dev_err(sc->ure_dip, CE_WARN,
 			    "failed to start bulk RX transfer");
 			usb_free_bulk_req(req);
@@ -3616,6 +3635,13 @@ ure_m_tx(void *arg, mblk_t *mp)
 
 	mutex_enter(&sc->ure_txc_lock);
 
+	/* Re-check after lock transition: disconnect may have fired */
+	if (sc->ure_gone) {
+		mutex_exit(&sc->ure_txc_lock);
+		freemsgchain(mp);
+		return (NULL);
+	}
+
 	/* 2. Pack frames into the coalescing buffer */
 	while (mp != NULL) {
 		uint32_t mlen, aligned_pos, data_pos;
@@ -3649,6 +3675,11 @@ ure_m_tx(void *arg, mblk_t *mp)
 		mlen = msgsize(mp);
 		aligned_pos = P2ROUNDUP(sc->ure_txc_pos, pkt_align);
 
+		/*
+		 * mlen is bounded by the MAC MTU (at most ~9000 for
+		 * jumbo, typically ~1518), so the addition below
+		 * cannot overflow uint32_t in practice.
+		 */
 		if (aligned_pos + hdrsize + mlen >
 		    sc->ure_txc_chain->uc_bufmax) {
 			if (sc->ure_txc_chain->uc_npkts == 0) {
@@ -3869,48 +3900,46 @@ ure_m_start(void *arg)
 	int error;
 
 	mutex_enter(&sc->ure_lock);
-
 	if (sc->ure_gone) {
 		mutex_exit(&sc->ure_lock);
 		return (EIO);
 	}
+	mutex_exit(&sc->ure_lock);
 
-	/* Ensure the PHY is powered up before NIC reset */
+	/* USB I/O - must not hold ure_lock (MUTEX_DRIVER) */
 	if ((error = ure_phy_powerup(sc)) != 0) {
-		mutex_exit(&sc->ure_lock);
 		return (EIO);
 	}
 
-	/* NIC reset */
 	if (sc->ure_flags & URE_FLAG_8152) {
 		error = ure_rtl8152_nic_reset(sc);
 	} else {
 		error = ure_rtl8153_nic_reset(sc);
 	}
-
 	if (error != 0) {
 		(void) ure_phy_powerdown(sc);
-		mutex_exit(&sc->ure_lock);
 		return (EIO);
 	}
 
-	/* Setup MAC, TX/RX, filters */
 	if ((error = ure_ifmedia_init(sc)) != 0) {
 		(void) ure_phy_powerdown(sc);
-		mutex_exit(&sc->ure_lock);
 		return (EIO);
 	}
 	if (ure_set_rx_filter(sc) != 0) {
 		(void) ure_phy_powerdown(sc);
+		return (EIO);
+	}
+
+	/* Reacquire lock to update state and start RX */
+	mutex_enter(&sc->ure_lock);
+	if (sc->ure_gone) {
 		mutex_exit(&sc->ure_lock);
+		(void) ure_phy_powerdown(sc);
 		return (EIO);
 	}
 
 	sc->ure_running = B_TRUE;
-
-	/* Start RX */
 	ure_rx_start(sc);
-
 	mutex_exit(&sc->ure_lock);
 
 	return (0);
@@ -3969,16 +3998,18 @@ static int
 ure_m_promisc(void *arg, boolean_t on)
 {
 	ure_softc_t *sc = (ure_softc_t *)arg;
+	boolean_t running;
 
 	mutex_enter(&sc->ure_lock);
 	sc->ure_promisc = on;
-	if (sc->ure_running) {
+	running = sc->ure_running;
+	mutex_exit(&sc->ure_lock);
+
+	if (running) {
 		if (ure_set_rx_filter(sc) != 0) {
-			mutex_exit(&sc->ure_lock);
 			return (EIO);
 		}
 	}
-	mutex_exit(&sc->ure_lock);
 
 	return (0);
 }
@@ -4044,6 +4075,7 @@ ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 {
 	ure_softc_t *sc = (ure_softc_t *)arg;
 	ure_mcast_entry_t *me;
+	boolean_t running;
 
 	mutex_enter(&sc->ure_lock);
 	if (add) {
@@ -4064,12 +4096,16 @@ ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 		}
 	}
 	ure_mcast_hash_rebuild(sc);
-	if (sc->ure_running) {
+	running = sc->ure_running;
+	mutex_exit(&sc->ure_lock);
+
+	if (running) {
 		if (ure_set_rx_filter(sc) != 0) {
 			/*
 			 * Roll back the list change so software state
 			 * stays in sync with what the hardware has.
 			 */
+			mutex_enter(&sc->ure_lock);
 			if (add) {
 				list_remove(&sc->ure_mcast_list, me);
 				kmem_free(me, sizeof (*me));
@@ -4085,7 +4121,6 @@ ure_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 	if (!add && me != NULL) {
 		kmem_free(me, sizeof (*me));
 	}
-	mutex_exit(&sc->ure_lock);
 
 	return (0);
 }
@@ -4094,13 +4129,17 @@ static int
 ure_m_unicst(void *arg, const uint8_t *macaddr)
 {
 	ure_softc_t *sc = (ure_softc_t *)arg;
+	boolean_t running;
 	int err = 0;
 
 	mutex_enter(&sc->ure_lock);
 	bcopy(macaddr, sc->ure_dev_addr, ETHERADDRL);
-	if (sc->ure_running) {
+	running = sc->ure_running;
+	mutex_exit(&sc->ure_lock);
+
+	if (running) {
 		uint8_t addr[8] = {0};
-		bcopy(sc->ure_dev_addr, addr, ETHERADDRL);
+		bcopy(macaddr, addr, ETHERADDRL);
 		if (ure_write_1(sc, URE_PLA_CRWECR,
 		    URE_MCU_TYPE_PLA,
 		    URE_CRWECR_CONFIG) != USB_SUCCESS) {
@@ -4118,7 +4157,6 @@ ure_m_unicst(void *arg, const uint8_t *macaddr)
 			}
 		}
 	}
-	mutex_exit(&sc->ure_lock);
 
 	return (err);
 }
@@ -4466,41 +4504,36 @@ ure_reconnect_cb(dev_info_t *dip)
 			goto reconn_fail;
 		}
 
-		mutex_enter(&sc->ure_lock);
-
-		/* NIC reset */
+		/* NIC reset - USB I/O, no lock held */
 		if (sc->ure_flags & URE_FLAG_8152) {
 			error = ure_rtl8152_nic_reset(sc);
 		} else {
 			error = ure_rtl8153_nic_reset(sc);
 		}
-
 		if (error != 0) {
-			mutex_exit(&sc->ure_lock);
 			dev_err(sc->ure_dip, CE_WARN,
 			    "NIC reset failed on reconnect");
 			goto reconn_fail;
 		}
 
-		/* Setup MAC, TX/RX, filters */
 		if (ure_ifmedia_init(sc) != 0) {
-			mutex_exit(&sc->ure_lock);
 			dev_err(sc->ure_dip, CE_WARN,
 			    "media init failed on reconnect");
 			goto reconn_fail;
 		}
 		if (ure_set_rx_filter(sc) != 0) {
-			mutex_exit(&sc->ure_lock);
 			dev_err(sc->ure_dip, CE_WARN,
 			    "RX filter setup failed on reconnect");
 			goto reconn_fail;
 		}
 
+		mutex_enter(&sc->ure_lock);
+		if (sc->ure_gone) {
+			mutex_exit(&sc->ure_lock);
+			goto reconn_fail;
+		}
 		sc->ure_running = B_TRUE;
-
-		/* Start RX */
 		ure_rx_start(sc);
-
 		mutex_exit(&sc->ure_lock);
 
 		mac_link_update(sc->ure_mh, LINK_STATE_UNKNOWN);
@@ -4836,45 +4869,40 @@ ure_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 				goto resume_fail;
 			}
 
-			mutex_enter(&sc->ure_lock);
-
-			/* NIC reset */
+			/* NIC reset - USB I/O, no lock held */
 			if (sc->ure_flags & URE_FLAG_8152) {
 				error = ure_rtl8152_nic_reset(sc);
 			} else {
 				error = ure_rtl8153_nic_reset(sc);
 			}
-
 			if (error != 0) {
-				mutex_exit(&sc->ure_lock);
 				dev_err(dip, CE_WARN,
 				    "NIC reset failed on resume");
 				goto resume_fail;
 			}
 
-			/* Restore MAC, TX/RX config, filters */
 			if (ure_ifmedia_init(sc) != 0) {
-				mutex_exit(&sc->ure_lock);
 				dev_err(dip, CE_WARN,
 				    "media init failed on resume");
 				goto resume_fail;
 			}
 			if (ure_set_rx_filter(sc) != 0) {
-				mutex_exit(&sc->ure_lock);
 				dev_err(dip, CE_WARN,
 				    "RX filter setup failed on resume");
 				goto resume_fail;
 			}
 
+			mutex_enter(&sc->ure_lock);
+			if (sc->ure_gone) {
+				mutex_exit(&sc->ure_lock);
+				goto resume_fail;
+			}
 			sc->ure_running = B_TRUE;
 			sc->ure_link_state = LINK_STATE_UNKNOWN;
 			sc->ure_link_speed = 0;
 			sc->ure_link_duplex = LINK_DUPLEX_UNKNOWN;
 			sc->ure_10gbt_stat = 0;
-
-			/* Restart RX */
 			ure_rx_start(sc);
-
 			mutex_exit(&sc->ure_lock);
 
 			mac_link_update(sc->ure_mh,
@@ -5166,9 +5194,16 @@ ure_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
+	/*
+	 * Stop the link timer before mac_disable so the timer
+	 * callback cannot call mac_link_update on a disabled MAC.
+	 */
+	ure_link_timer_stop(sc);
+
 	/* Attempt MAC unregister first, may fail if busy */
 	if (sc->ure_attach_seq & URE_ATTACH_MAC_REG) {
 		if (mac_disable(sc->ure_mh) != 0) {
+			ure_link_timer_start(sc);
 			return (DDI_FAILURE);
 		}
 	}
