@@ -2190,9 +2190,9 @@ ure_rtl8152_nic_reset(ure_softc_t *sc)
 		return (err);
 	}
 
-	/* Configure Tx FIFO threshold */
+	/* Configure Tx FIFO threshold (NORMAL2 for RTL8152) */
 	if ((err = ure_write_4(sc, URE_PLA_TXFIFO_CTRL, URE_MCU_TYPE_PLA,
-	    URE_TXFIFO_THR_NORMAL)) != USB_SUCCESS) {
+	    URE_TXFIFO_THR_NORMAL2)) != USB_SUCCESS) {
 		return (err);
 	}
 
@@ -2219,6 +2219,25 @@ ure_rtl8152_nic_reset(ure_softc_t *sc)
 	if ((err = ure_setbit_2(sc, URE_PLA_TCR0, URE_MCU_TYPE_PLA,
 	    URE_TCR0_AUTO_FIFO)) != USB_SUCCESS) {
 		return (err);
+	}
+
+	/*
+	 * Advertise 802.3x flow control (PAUSE) capability so the switch
+	 * can negotiate PAUSE frames, reducing RX drops under heavy load.
+	 * Linux does this in r8152b_enable_fc(); OpenBSD omits it.
+	 */
+	{
+		uint16_t anar;
+
+		if ((err = ure_ocp_reg_read(sc, URE_OCP_ANAR,
+		    &anar)) != USB_SUCCESS) {
+			return (err);
+		}
+		anar |= URE_ANAR_PAUSE | URE_ANAR_ASYM_PAUSE;
+		if ((err = ure_ocp_reg_write(sc, URE_OCP_ANAR,
+		    anar)) != USB_SUCCESS) {
+			return (err);
+		}
 	}
 
 	/* Enable ALDPS */

@@ -246,6 +246,9 @@ extern "C" {
 #define	URE_OCP_BMCR_PDOWN	0x0800	/* PHY power-down */
 #define	URE_OCP_BMCR_ANE	0x1000	/* auto-negotiation enable */
 #define	URE_OCP_BMCR_RSAN	0x0200	/* restart auto-negotiation */
+#define	URE_OCP_ANAR		0xa408	/* MII advertisement (register 4) */
+#define	URE_ANAR_PAUSE		0x0400	/* advertise 802.3x PAUSE */
+#define	URE_ANAR_ASYM_PAUSE	0x0800	/* advertise asymmetric PAUSE */
 #define	URE_OCP_EEE_AR		0xa41a
 #define	URE_OCP_EEE_DATA	0xa41c
 #define	URE_OCP_PHY_STATUS	0xa420
