@@ -114,6 +114,7 @@ extern "C" {
 #define	URE_PLA_FMC		0xc0b4
 #define	URE_PLA_CFG_WOL		0xc0b6
 #define	URE_PLA_TEREDO_CFG	0xc0bc
+#define	URE_PLA_TEREDO_WAKE_BASE	0xc0c4
 #define	URE_PLA_MAR		0xcd00
 #define	URE_PLA_BACKUP		0xd000
 #define	URE_PLA_BDC_CR		0xd1a0
@@ -198,6 +199,7 @@ extern "C" {
 #define	URE_USB_LPM_CTRL	0xd41a
 #define	URE_USB_USB_TIMER	0xd428
 #define	URE_USB_RX_EARLY_AGG	0xd42c
+#define	URE_USB_RX_EARLY_TIMEOUT	URE_USB_RX_EARLY_AGG	/* Linux name */
 #define	URE_USB_RX_EARLY_SIZE	0xd42e
 #define	URE_USB_PM_CTRL_STATUS	0xd432
 #define	URE_USB_TX_DMA		0xd434
@@ -273,9 +275,18 @@ extern "C" {
 
 /* SRAM registers */
 #define	URE_SRAM_LPF_CFG	0x8012
+#define	URE_SRAM_GREEN_CFG	0x8045
 #define	URE_SRAM_10M_AMP1	0x8080
 #define	URE_SRAM_10M_AMP2	0x8082
 #define	URE_SRAM_IMPEDANCE	0x8084
+
+/* SRAM GREEN_CFG bits */
+#define	URE_GREEN_ETH_EN	0x8000
+
+/* OCP PHY patch interface (0xb800) */
+#define	URE_OCP_PHY_PATCH_CMD	0xb800
+#define	URE_PATCH_REQUEST	0x0010
+#define	URE_PATCH_READY		0x0040
 
 /* ------------------------------------------------------------------ */
 /* Register bit definitions                                           */
@@ -335,6 +346,9 @@ extern "C" {
 
 /* URE_PLA_TCR1 */
 #define	URE_VERSION_MASK	0x7cf0
+#define	URE_IFG_MASK		0x0308	/* BIT(9)|BIT(8)|BIT(3) */
+#define	URE_IFG_144NS		0x0200	/* BIT(9) */
+#define	URE_IFG_96NS		0x0300	/* BIT(9)|BIT(8) */
 
 /* URE_PLA_MTPS */
 #define	URE_MTPS_DEFAULT	96
