@@ -189,6 +189,7 @@ static void	ure_txc_timeout(void *);
 static int	ure_chip_init(ure_softc_t *);
 static void	ure_chip_uninit(ure_softc_t *);
 static int	ure_rtl8152_init(ure_softc_t *);
+static int	ure_rtl8153_phy_cfg(ure_softc_t *);
 static int	ure_rtl8153_init(ure_softc_t *);
 static int	ure_rtl8153b_init(ure_softc_t *);
 static int	ure_rtl8157_init(ure_softc_t *);
@@ -240,6 +241,7 @@ static int	ure_clrbit_2(ure_softc_t *, uint16_t, uint16_t, uint16_t);
 static int	ure_clrbit_4(ure_softc_t *, uint16_t, uint16_t, uint32_t);
 static int	ure_ocp_reg_read(ure_softc_t *, uint16_t, uint16_t *);
 static int	ure_ocp_reg_write(ure_softc_t *, uint16_t, uint16_t);
+static int	ure_sram_write(ure_softc_t *, uint16_t, uint16_t);
 static int	ure_ocp_cmd_read(ure_softc_t *, uint16_t, int, uint32_t *);
 static int	ure_ocp_cmd_write(ure_softc_t *, uint16_t, int, uint32_t);
 static int	ure_ocp_cmd_setbit(ure_softc_t *, uint16_t, int, uint32_t);
@@ -656,6 +658,22 @@ ure_ocp_reg_write(ure_softc_t *sc, uint16_t addr, uint16_t data)
 	reg = (addr & 0x0fff) | 0xb000;
 
 	return (ure_write_2(sc, reg, URE_MCU_TYPE_PLA, data));
+}
+
+/*
+ * Write an indirect PHY SRAM register.  The SRAM address is written to
+ * OCP_SRAM_ADDR (0xa436), then the data to OCP_SRAM_DATA (0xa438).
+ * Used for PHY tuning parameters (impedance, LPF corner, 10M amplitude).
+ */
+static int
+ure_sram_write(ure_softc_t *sc, uint16_t addr, uint16_t data)
+{
+	int err;
+
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_SRAM_ADDR, addr)) != 0) {
+		return (err);
+	}
+	return (ure_ocp_reg_write(sc, URE_OCP_SRAM_DATA, data));
 }
 
 /*
@@ -1316,6 +1334,166 @@ ure_rtl8152_init(ure_softc_t *sc)
 	return (USB_SUCCESS);
 }
 
+/*
+ * RTL8153 PHY parameter configuration.
+ *
+ * Matches Linux r8153_hw_phy_cfg(): disable ALDPS and EEE, apply PHY
+ * tuning parameters (impedance, LPF corner, 10M amplitude, power
+ * regulator mode, EEE clock divider, 10M power-down optimizations),
+ * then re-enable EEE, ALDPS, and flow control.
+ *
+ * Called once from ure_rtl8153_init() during initial attach.
+ */
+static int
+ure_rtl8153_phy_cfg(ure_softc_t *sc)
+{
+	uint16_t val;
+	int err;
+	int i;
+
+	/* Disable ALDPS before updating PHY parameters */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_POWER_CFG, &val)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_POWER_CFG,
+	    val & ~URE_EN_ALDPS)) != 0) {
+		return (err);
+	}
+	for (i = 0; i < 20; i++) {
+		delay(drv_usectohz(1000));
+		if ((err = ure_read_2(sc, URE_PLA_ALDPS_STATUS,
+		    URE_MCU_TYPE_PLA, &val)) != USB_SUCCESS) {
+			return (err);
+		}
+		if (val & URE_ALDPS_STATUS_IDLE) {
+			break;
+		}
+	}
+
+	/* Disable EEE before updating PHY parameters */
+	if ((err = ure_clrbit_2(sc, URE_PLA_EEE_CR, URE_MCU_TYPE_PLA,
+	    URE_EEE_RX_EN | URE_EEE_TX_EN)) != USB_SUCCESS) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_EEE_CFG, &val)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_EEE_CFG,
+	    val & ~URE_EEE10_EN)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_EEE_ADV, 0)) != 0) {
+		return (err);
+	}
+
+	/* VER_03 (5C00): clear CTAP_SHORT_EN */
+	if (sc->ure_chip & URE_CHIP_VER_5C00) {
+		if ((err = ure_ocp_reg_read(sc, URE_OCP_EEE_CFG,
+		    &val)) != 0) {
+			return (err);
+		}
+		if ((err = ure_ocp_reg_write(sc, URE_OCP_EEE_CFG,
+		    val & ~URE_CTAP_SHORT_EN)) != 0) {
+			return (err);
+		}
+	}
+
+	/* EEE clock divider enable */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_POWER_CFG, &val)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_POWER_CFG,
+	    val | URE_EEE_CLKDIV_EN)) != 0) {
+		return (err);
+	}
+
+	/* 10M background-off enable */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_DOWN_SPEED, &val)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_DOWN_SPEED,
+	    val | URE_EN_10M_BGOFF)) != 0) {
+		return (err);
+	}
+
+	/* 10M PLL-off enable */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_POWER_CFG, &val)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_POWER_CFG,
+	    val | URE_EN_10M_PLLOFF)) != 0) {
+		return (err);
+	}
+
+	/* PHY impedance tuning */
+	if ((err = ure_sram_write(sc, URE_SRAM_IMPEDANCE, 0x0b13)) != 0) {
+		return (err);
+	}
+
+	/* PFM/PWM power regulator switch */
+	if ((err = ure_setbit_2(sc, URE_PLA_PHY_PWR, URE_MCU_TYPE_PLA,
+	    URE_PFM_PWM_SWITCH)) != USB_SUCCESS) {
+		return (err);
+	}
+
+	/* LPF corner auto-tune */
+	if ((err = ure_sram_write(sc, URE_SRAM_LPF_CFG, 0xf70f)) != 0) {
+		return (err);
+	}
+
+	/* 10M amplitude tuning */
+	if ((err = ure_sram_write(sc, URE_SRAM_10M_AMP1, 0x00af)) != 0) {
+		return (err);
+	}
+	if ((err = ure_sram_write(sc, URE_SRAM_10M_AMP2, 0x0208)) != 0) {
+		return (err);
+	}
+
+	/* Re-enable EEE */
+	if ((err = ure_setbit_2(sc, URE_PLA_EEE_CR, URE_MCU_TYPE_PLA,
+	    URE_EEE_RX_EN | URE_EEE_TX_EN)) != USB_SUCCESS) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_EEE_CFG, &val)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_EEE_CFG,
+	    val | URE_EEE10_EN)) != 0) {
+		return (err);
+	}
+
+	/*
+	 * Advertise EEE capability.  Read OCP_EEE_ABLE to get the PHY's
+	 * supported modes and advertise all of them.
+	 */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_EEE_ABLE, &val)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_EEE_ADV, val)) != 0) {
+		return (err);
+	}
+
+	/* Re-enable ALDPS */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_POWER_CFG, &val)) != 0) {
+		return (err);
+	}
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_POWER_CFG,
+	    val | URE_EN_ALDPS)) != 0) {
+		return (err);
+	}
+
+	/* Enable flow control (advertise PAUSE and ASYM_PAUSE) */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_ANAR, &val)) != 0) {
+		return (err);
+	}
+	val |= URE_ANAR_PAUSE | URE_ANAR_ASYM_PAUSE;
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_ANAR, val)) != 0) {
+		return (err);
+	}
+
+	return (USB_SUCCESS);
+}
+
 static int
 ure_rtl8153_init(ure_softc_t *sc)
 {
@@ -1344,6 +1522,11 @@ ure_rtl8153_init(ure_softc_t *sc)
 		return (USB_FAILURE);
 	}
 
+	/* PHY parameter tuning: impedance, LPF, 10M amplitude, EEE */
+	if ((err = ure_rtl8153_phy_cfg(sc)) != USB_SUCCESS) {
+		return (err);
+	}
+
 	if ((err = ure_rtl8153_phy_status(sc, 0, &reg)) != 0) {
 		return (err);
 	}
@@ -1354,6 +1537,28 @@ ure_rtl8153_init(ure_softc_t *sc)
 		    URE_CKADSEL_L | URE_ADC_EN |
 		    URE_EN_EMI_L)) != 0) {
 			return (err);
+		}
+	}
+
+	/*
+	 * Clear BMCR PDOWN if firmware left the PHY powered down.
+	 * Without this the second phy_status(LAN_ON) call will
+	 * stall for 10 seconds because the PHY cannot reach LAN_ON
+	 * while powered down.  Matches the 8153B pattern and Linux.
+	 */
+	{
+		uint16_t bmcr;
+
+		if ((err = ure_phy_read(sc, URE_OCP_BMCR,
+		    &bmcr)) != 0) {
+			return (err);
+		}
+		if (bmcr & URE_OCP_BMCR_PDOWN) {
+			bmcr &= ~URE_OCP_BMCR_PDOWN;
+			if ((err = ure_phy_write(sc, URE_OCP_BMCR,
+			    bmcr)) != 0) {
+				return (err);
+			}
 		}
 	}
 
@@ -1487,6 +1692,35 @@ ure_rtl8153_init(ure_softc_t *sc)
 	if ((err = ure_write_2(sc, URE_PLA_MAC_PWR_CTRL4,
 	    URE_MCU_TYPE_PLA, 0)) != USB_SUCCESS) {
 		return (err);
+	}
+
+	/*
+	 * VER_06 (5C30): configure link-change polling.
+	 * Linux sets POLL_LINK_CHG and seeds CUR_LINK_OK from the
+	 * current PHY link status.  Without this the chip's internal
+	 * link-change detection may miss events on this silicon revision.
+	 */
+	if (sc->ure_chip & URE_CHIP_VER_5C30) {
+		uint16_t extra, physt;
+
+		if ((err = ure_read_2(sc, URE_PLA_EXTRA_STATUS,
+		    URE_MCU_TYPE_PLA, &extra)) != USB_SUCCESS) {
+			return (err);
+		}
+		if ((err = ure_read_2(sc, URE_PLA_PHYSTATUS,
+		    URE_MCU_TYPE_PLA, &physt)) != USB_SUCCESS) {
+			return (err);
+		}
+		if (physt & URE_PHYSTATUS_LINK) {
+			extra |= URE_CUR_LINK_OK;
+		} else {
+			extra &= ~URE_CUR_LINK_OK;
+		}
+		if ((err = ure_write_2(sc, URE_PLA_EXTRA_STATUS,
+		    URE_MCU_TYPE_PLA,
+		    extra | URE_POLL_LINK_CHG)) != USB_SUCCESS) {
+			return (err);
+		}
 	}
 
 	/* Enable Rx aggregation */
