@@ -108,6 +108,7 @@ extern "C" {
 #define	URE_CHIP_VER_6010	0x0040
 #define	URE_CHIP_VER_7420	0x0080
 #define	URE_CHIP_VER_7400	0x0100
+#define	URE_CHIP_VER_7030	0x0200
 
 /*
  * Attach sequence tracking: each bit indicates a resource that

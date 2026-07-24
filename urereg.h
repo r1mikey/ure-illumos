@@ -131,6 +131,7 @@ extern "C" {
 #define	URE_PLA_LWAKE_CTRL_REG	0xe007
 #define	URE_PLA_GPHY_INTR_IMR	0xe022
 #define	URE_PLA_EEE_CR		0xe040
+#define	URE_PLA_EEE_TXTWSYS_2P5G	0xe058
 #define	URE_PLA_EEEP_CR		0xe080
 #define	URE_PLA_MAC_PWR_CTRL	0xe0c0
 #define	URE_PLA_MAC_PWR_CTRL2	0xe0ca
@@ -218,6 +219,7 @@ extern "C" {
 #define	URE_USB_MISC_0		0xd81a
 #define	URE_USB_AFE_CTRL2	0xd824
 #define	URE_USB_UPS_FLAGS	0xd848
+#define	URE_USB_UPS_CFG		0xd842
 #define	URE_USB_WDT11_CTRL	0xe43c
 #define	URE_USB_UNDOC_CFFE	0xcffe	/* undocumented USB register */
 #define	URE_USB_UNDOC_D3CA	0xd3ca	/* undocumented USB register */
@@ -252,6 +254,7 @@ extern "C" {
 #define	URE_OCP_EEE_AR		0xa41a
 #define	URE_OCP_EEE_DATA	0xa41c
 #define	URE_OCP_PHY_STATUS	0xa420
+#define	URE_OCP_INTR_EN		0xa424
 #define	URE_OCP_POWER_CFG	0xa430
 #define	URE_OCP_EEE_CFG		0xa432
 #define	URE_OCP_SRAM_ADDR	0xa436
@@ -264,6 +267,9 @@ extern "C" {
 #define	URE_OCP_10GBT_STAT	0xa5d6
 #define	URE_OCP_PHY_STATE	0xa708
 #define	URE_OCP_ADC_CFG		0xbc06
+#define	URE_OCP_SYSCLK_CFG	0xc416
+#define	URE_OCP_SRAM2_ADDR	0xb87c
+#define	URE_OCP_SRAM2_DATA	0xb87e
 
 /* SRAM registers */
 #define	URE_SRAM_LPF_CFG	0x8012
@@ -467,6 +473,10 @@ extern "C" {
 /* URE_PLA_CONFIG6 */
 #define	URE_LANWAKE_CLR_EN	0x01
 
+/* URE_PLA_USB_CFG */
+#define	URE_EN_XG_LIP		0x0002
+#define	URE_EN_G_LIP		0x0004
+
 /* URE_USB_USB2PHY */
 #define	URE_USB2PHY_SUSPEND	0x0001
 #define	URE_USB2PHY_L1		0x0002
@@ -608,6 +618,9 @@ extern "C" {
 /* URE_USB_UPS_FLAGS */
 #define	URE_UPS_FLAGS_EN_ALDPS	0x00000008
 
+/* URE_USB_UPS_CFG */
+#define	URE_MID_REVERSE		0x0020
+
 /* URE_OCP_ALDPS_CONFIG */
 #define	URE_ENPWRSAVE		0x8000
 #define	URE_ENPDNPS		0x0200
@@ -630,6 +643,9 @@ extern "C" {
 #define	URE_EEE10_EN		0x0010
 
 /* URE_OCP_DOWN_SPEED */
+#define	URE_EN_EEE_1000		0x2000
+#define	URE_EN_EEE_100		0x1000
+#define	URE_EN_10M_CLKDIV	0x0800
 #define	URE_EN_10M_BGOFF	0x0080
 
 /* URE_OCP_PHY_STATE */
@@ -644,6 +660,10 @@ extern "C" {
 /* 2.5G/5G advertisement (OCP 0xa5d4) */
 #define	URE_ADV_2500TFDX	0x0080
 #define	URE_ADV_5000TFDX	0x0100
+#define	URE_RTL_ADV2_5G_F_R	0x0020	/* 2.5G fast retrain */
+
+/* OCP_INTR_EN (0xa424) */
+#define	URE_INTR_SPEED_FORCE	0x0008
 
 /* 2.5G/5G link partner ability (OCP 0xa5d6) */
 #define	URE_LP_2500TFDX		0x0020

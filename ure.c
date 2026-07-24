@@ -242,6 +242,10 @@ static int	ure_clrbit_4(ure_softc_t *, uint16_t, uint16_t, uint32_t);
 static int	ure_ocp_reg_read(ure_softc_t *, uint16_t, uint16_t *);
 static int	ure_ocp_reg_write(ure_softc_t *, uint16_t, uint16_t);
 static int	ure_sram_write(ure_softc_t *, uint16_t, uint16_t);
+static int	ure_sram_read(ure_softc_t *, uint16_t, uint16_t *);
+static int	ure_sram2_write(ure_softc_t *, uint16_t, uint16_t);
+static int	ure_sram2_read(ure_softc_t *, uint16_t, uint16_t *);
+static int	ure_rtl8156_phy_cfg(ure_softc_t *);
 static int	ure_ocp_cmd_read(ure_softc_t *, uint16_t, int, uint32_t *);
 static int	ure_ocp_cmd_write(ure_softc_t *, uint16_t, int, uint32_t);
 static int	ure_ocp_cmd_setbit(ure_softc_t *, uint16_t, int, uint32_t);
@@ -674,6 +678,54 @@ ure_sram_write(ure_softc_t *sc, uint16_t addr, uint16_t data)
 		return (err);
 	}
 	return (ure_ocp_reg_write(sc, URE_OCP_SRAM_DATA, data));
+}
+
+/*
+ * Read an indirect PHY SRAM register.  The SRAM address is written to
+ * OCP_SRAM_ADDR (0xa436), then the data is read from OCP_SRAM_DATA
+ * (0xa438).
+ */
+static int
+ure_sram_read(ure_softc_t *sc, uint16_t addr, uint16_t *valp)
+{
+	int err;
+
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_SRAM_ADDR, addr)) != 0) {
+		*valp = 0;
+		return (err);
+	}
+	return (ure_ocp_reg_read(sc, URE_OCP_SRAM_DATA, valp));
+}
+
+/*
+ * Write an indirect PHY SRAM bank 2 register.  The address is written to
+ * OCP_SRAM2_ADDR (0xb87c), then the data to OCP_SRAM2_DATA (0xb87e).
+ * Used for VER_11 (0x7030) PHY tuning.
+ */
+static int
+ure_sram2_write(ure_softc_t *sc, uint16_t addr, uint16_t data)
+{
+	int err;
+
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_SRAM2_ADDR, addr)) != 0) {
+		return (err);
+	}
+	return (ure_ocp_reg_write(sc, URE_OCP_SRAM2_DATA, data));
+}
+
+/*
+ * Read an indirect PHY SRAM bank 2 register.
+ */
+static int
+ure_sram2_read(ure_softc_t *sc, uint16_t addr, uint16_t *valp)
+{
+	int err;
+
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_SRAM2_ADDR, addr)) != 0) {
+		*valp = 0;
+		return (err);
+	}
+	return (ure_ocp_reg_read(sc, URE_OCP_SRAM2_DATA, valp));
 }
 
 /*
@@ -2083,6 +2135,703 @@ ure_rtl8153b_init(ure_softc_t *sc)
 	return (USB_SUCCESS);
 }
 
+/*
+ * RTL8156 PHY analog front-end tuning.
+ *
+ * Programs the 2.5G PHY registers to match the tuning sequences from
+ * Linux r8152 r8156_hw_phy_cfg().  VER_10 (0x7020) gets OCP and SRAM
+ * signal quality tuning.  VER_11 (0x7030) adds SRAM2 tuning, EEE 2.5G
+ * timers, ADC calibration, thermal sensor, Nway 2.5G Lite, CS DSP, and
+ * MDI swap compensation.
+ *
+ * Firmware loading is not included here.
+ */
+static int
+ure_rtl8156_phy_cfg(ure_softc_t *sc)
+{
+	uint16_t val;
+	int err;
+
+	/* Disable ALDPS while updating PHY parameters */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_POWER_CFG, &val)) != 0) {
+		return (err);
+	}
+	val &= ~URE_EN_ALDPS;
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_POWER_CFG, val)) != 0) {
+		return (err);
+	}
+
+	/* Set PFM_PWM_SWITCH */
+	if ((err = ure_setbit_2(sc, URE_PLA_PHY_PWR, URE_MCU_TYPE_PLA,
+	    URE_PFM_PWM_SWITCH)) != USB_SUCCESS) {
+		return (err);
+	}
+
+	if (sc->ure_chip & URE_CHIP_VER_7030) {
+		/*
+		 * VER_11 (0x7030) PHY analog tuning.
+		 */
+		if ((err = ure_ocp_reg_read(sc, 0xad16, &val)) != 0) {
+			return (err);
+		}
+		val |= 0x03ff;
+		if ((err = ure_ocp_reg_write(sc, 0xad16, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad32, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x003f) | 0x0006;
+		if ((err = ure_ocp_reg_write(sc, 0xad32, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xac08, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x1100;
+		if ((err = ure_ocp_reg_write(sc, 0xac08, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xacc0, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x0003) | 0x0002;
+		if ((err = ure_ocp_reg_write(sc, 0xacc0, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad40, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x00e7) | 0x0044;
+		if ((err = ure_ocp_reg_write(sc, 0xad40, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xac14, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x0080;
+		if ((err = ure_ocp_reg_write(sc, 0xac14, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xac80, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x0300;
+		if ((err = ure_ocp_reg_write(sc, 0xac80, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xac5e, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x0007) | 0x0002;
+		if ((err = ure_ocp_reg_write(sc, 0xac5e, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_write(sc, 0xad4c, 0x00a8)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_write(sc, 0xac5c, 0x01ff)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xac8a, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x00f0) | 0x0030;
+		if ((err = ure_ocp_reg_write(sc, 0xac8a, val)) != 0) {
+			return (err);
+		}
+
+		/* SRAM2 tuning */
+		if ((err = ure_sram2_read(sc, 0x8157, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0x0500;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM2_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram2_read(sc, 0x8159, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0x0700;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM2_DATA, val)) != 0) {
+			return (err);
+		}
+
+		/* AAGC */
+		if ((err = ure_sram2_write(sc, 0x80a2, 0x0153)) != 0) {
+			return (err);
+		}
+		if ((err = ure_sram2_write(sc, 0x809c, 0x0153)) != 0) {
+			return (err);
+		}
+
+		/* EEE 2.5G TX wakeup timer */
+		if ((err = ure_write_2(sc, URE_PLA_EEE_TXTWSYS_2P5G,
+		    URE_MCU_TYPE_PLA, 0x0056)) != USB_SUCCESS) {
+			return (err);
+		}
+
+		/* USB low-idle-power for multi-gig */
+		if ((err = ure_setbit_2(sc, URE_PLA_USB_CFG,
+		    URE_MCU_TYPE_PLA,
+		    URE_EN_XG_LIP | URE_EN_G_LIP)) != USB_SUCCESS) {
+			return (err);
+		}
+
+		/* XG PLL */
+		if ((err = ure_sram_write(sc, 0x8257, 0x020f)) != 0) {
+			return (err);
+		}
+
+		/* GIGA Master */
+		if ((err = ure_sram_write(sc, 0x80ea, 0x7843)) != 0) {
+			return (err);
+		}
+
+		/* Advance EEE */
+		if ((err = ure_setbit_2(sc, URE_PLA_MAC_PWR_CTRL4,
+		    URE_MCU_TYPE_PLA,
+		    URE_EEE_SPDWN_EN)) != USB_SUCCESS) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc,
+		    URE_OCP_DOWN_SPEED, &val)) != 0) {
+			return (err);
+		}
+		val &= ~(URE_EN_EEE_100 | URE_EN_EEE_1000);
+		val |= URE_EN_10M_CLKDIV;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_DOWN_SPEED, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc,
+		    URE_OCP_POWER_CFG, &val)) != 0) {
+			return (err);
+		}
+		val &= ~URE_EEE_CLKDIV_EN;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_POWER_CFG, val)) != 0) {
+			return (err);
+		}
+
+		/* SYSCLK_CFG reset */
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SYSCLK_CFG, 0)) != 0) {
+			return (err);
+		}
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SYSCLK_CFG, 0x0500)) != 0) {
+			return (err);
+		}
+
+		/* Enable ADC Ibias Cal */
+		if ((err = ure_ocp_reg_read(sc, 0xd068, &val)) != 0) {
+			return (err);
+		}
+		val |= 0x2000;
+		if ((err = ure_ocp_reg_write(sc, 0xd068, val)) != 0) {
+			return (err);
+		}
+
+		/* Enable Thermal Sensor */
+		if ((err = ure_sram_read(sc, 0x81a2, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x0100;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xb54c, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0xdb00;
+		if ((err = ure_ocp_reg_write(sc, 0xb54c, val)) != 0) {
+			return (err);
+		}
+
+		/* Nway 2.5G Lite */
+		if ((err = ure_ocp_reg_read(sc, 0xa454, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x0001;
+		if ((err = ure_ocp_reg_write(sc, 0xa454, val)) != 0) {
+			return (err);
+		}
+
+		/* CS DSP */
+		if ((err = ure_ocp_reg_read(sc,
+		    URE_OCP_10GBT_CTRL, &val)) != 0) {
+			return (err);
+		}
+		val |= URE_RTL_ADV2_5G_F_R;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_10GBT_CTRL, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad4e, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x0010;
+		if ((err = ure_ocp_reg_write(sc, 0xad4e, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xa86a, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x0001;
+		if ((err = ure_ocp_reg_write(sc, 0xa86a, val)) != 0) {
+			return (err);
+		}
+
+		/*
+		 * MDI swap compensation.
+		 *
+		 * When MID_REVERSE is set in USB_UPS_CFG and BIT(1)
+		 * is set in OCP 0xd068, the MDI pairs have been
+		 * swapped by the hardware.  Compensate by exchanging
+		 * the per-pair PHY coefficients.
+		 */
+		{
+			uint16_t ups_cfg;
+			uint16_t d068;
+
+			if ((err = ure_read_2(sc, URE_USB_UPS_CFG,
+			    URE_MCU_TYPE_USB, &ups_cfg)) != USB_SUCCESS) {
+				return (err);
+			}
+			if ((err = ure_ocp_reg_read(sc,
+			    0xd068, &d068)) != 0) {
+				return (err);
+			}
+
+			if ((ups_cfg & URE_MID_REVERSE) &&
+			    (d068 & 0x0002)) {
+				uint16_t swap_a, swap_b, data;
+
+				/* Select page 0 */
+				data = d068 & ~0x001f;
+				data |= 0x0001;
+				if ((err = ure_ocp_reg_write(sc,
+				    0xd068, data)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_read(sc,
+				    0xd06a, &swap_a)) != 0) {
+					return (err);
+				}
+
+				/* Select page 3 */
+				data = (data & ~0x0018) | 0x0018;
+				if ((err = ure_ocp_reg_write(sc,
+				    0xd068, data)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_read(sc,
+				    0xd06a, &swap_b)) != 0) {
+					return (err);
+				}
+
+				/* Write swapped p0 */
+				data &= ~0x0018;
+				if ((err = ure_ocp_reg_write(sc,
+				    0xd068, data)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_write(sc, 0xd06a,
+				    (swap_a & ~0x07ff) |
+				    (swap_b & 0x07ff))) != 0) {
+					return (err);
+				}
+
+				/* Write swapped p3 */
+				data |= 0x0018;
+				if ((err = ure_ocp_reg_write(sc,
+				    0xd068, data)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_write(sc, 0xd06a,
+				    (swap_b & ~0x07ff) |
+				    (swap_a & 0x07ff))) != 0) {
+					return (err);
+				}
+
+				/* Select page 1 */
+				data = (data & ~0x0018) | 0x0008;
+				if ((err = ure_ocp_reg_write(sc,
+				    0xd068, data)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_read(sc,
+				    0xd06a, &swap_a)) != 0) {
+					return (err);
+				}
+
+				/* Select page 2 */
+				data = (data & ~0x0018) | 0x0010;
+				if ((err = ure_ocp_reg_write(sc,
+				    0xd068, data)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_read(sc,
+				    0xd06a, &swap_b)) != 0) {
+					return (err);
+				}
+
+				/* Write swapped p1 */
+				data = (data & ~0x0018) | 0x0008;
+				if ((err = ure_ocp_reg_write(sc,
+				    0xd068, data)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_write(sc, 0xd06a,
+				    (swap_a & ~0x07ff) |
+				    (swap_b & 0x07ff))) != 0) {
+					return (err);
+				}
+
+				/* Write swapped p2 */
+				data = (data & ~0x0018) | 0x0010;
+				if ((err = ure_ocp_reg_write(sc,
+				    0xd068, data)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_write(sc, 0xd06a,
+				    (swap_b & ~0x07ff) |
+				    (swap_a & 0x07ff))) != 0) {
+					return (err);
+				}
+
+				/* Swap 0xbd5a / 0xbd5c */
+				if ((err = ure_ocp_reg_read(sc,
+				    0xbd5a, &swap_a)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_read(sc,
+				    0xbd5c, &swap_b)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_write(sc, 0xbd5a,
+				    (swap_a & ~0x1f1f) |
+				    ((swap_b & 0x001f) << 8) |
+				    ((swap_b >> 8) & 0x001f))) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_write(sc, 0xbd5c,
+				    (swap_b & ~0x1f1f) |
+				    ((swap_a & 0x001f) << 8) |
+				    ((swap_a >> 8) & 0x001f))) != 0) {
+					return (err);
+				}
+
+				/* Swap 0xbc18 / 0xbc1a */
+				if ((err = ure_ocp_reg_read(sc,
+				    0xbc18, &swap_a)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_read(sc,
+				    0xbc1a, &swap_b)) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_write(sc, 0xbc18,
+				    (swap_a & ~0x1f1f) |
+				    ((swap_b & 0x001f) << 8) |
+				    ((swap_b >> 8) & 0x001f))) != 0) {
+					return (err);
+				}
+				if ((err = ure_ocp_reg_write(sc, 0xbc1a,
+				    (swap_b & ~0x1f1f) |
+				    ((swap_a & 0x001f) << 8) |
+				    ((swap_a >> 8) & 0x001f))) != 0) {
+					return (err);
+				}
+			}
+		}
+
+		/* Notify MAC when speed changes to force mode */
+		if ((err = ure_ocp_reg_read(sc,
+		    URE_OCP_INTR_EN, &val)) != 0) {
+			return (err);
+		}
+		val |= URE_INTR_SPEED_FORCE;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_INTR_EN, val)) != 0) {
+			return (err);
+		}
+	} else {
+		/*
+		 * VER_10 (0x7020) PHY analog tuning.
+		 */
+		if ((err = ure_ocp_reg_read(sc, 0xad40, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x03ff) | 0x0084;
+		if ((err = ure_ocp_reg_write(sc, 0xad40, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad4e, &val)) != 0) {
+			return (err);
+		}
+		val |= 0x0010;
+		if ((err = ure_ocp_reg_write(sc, 0xad4e, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad16, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x03ff) | 0x0006;
+		if ((err = ure_ocp_reg_write(sc, 0xad16, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad32, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x003f) | 0x0006;
+		if ((err = ure_ocp_reg_write(sc, 0xad32, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xac08, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x1100;
+		if ((err = ure_ocp_reg_write(sc, 0xac08, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xac8a, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x8000) | 0x7000;
+		if ((err = ure_ocp_reg_write(sc, 0xac8a, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad18, &val)) != 0) {
+			return (err);
+		}
+		val |= 0x0400;
+		if ((err = ure_ocp_reg_write(sc, 0xad18, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad1a, &val)) != 0) {
+			return (err);
+		}
+		val |= 0x03ff;
+		if ((err = ure_ocp_reg_write(sc, 0xad1a, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xad1c, &val)) != 0) {
+			return (err);
+		}
+		val |= 0x03ff;
+		if ((err = ure_ocp_reg_write(sc, 0xad1c, val)) != 0) {
+			return (err);
+		}
+
+		/* SRAM signal quality tuning */
+		if ((err = ure_sram_read(sc, 0x80ea, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0xc400;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x80eb, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x0700) | 0x0300;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x80f8, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0x1c00;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x80f1, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0x3000;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x80fe, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0xa500;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x8102, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0x5000;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x8015, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0x3300;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x8100, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0x7000;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x8014, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0xf000;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x8016, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0x6500;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x80dc, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0xff00) | 0xed00;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x80df, &val)) != 0) {
+			return (err);
+		}
+		val |= 0x0100;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_read(sc, 0x80e1, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x0100;
+		if ((err = ure_ocp_reg_write(sc,
+		    URE_OCP_SRAM_DATA, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xbf06, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x003f) | 0x0038;
+		if ((err = ure_ocp_reg_write(sc, 0xbf06, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_sram_write(sc, 0x819f, 0xddb6)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_write(sc, 0xbc34, 0x5555)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xbf0a, &val)) != 0) {
+			return (err);
+		}
+		val = (val & ~0x0e00) | 0x0a00;
+		if ((err = ure_ocp_reg_write(sc, 0xbf0a, val)) != 0) {
+			return (err);
+		}
+
+		if ((err = ure_ocp_reg_read(sc, 0xbd2c, &val)) != 0) {
+			return (err);
+		}
+		val &= ~0x2000;
+		if ((err = ure_ocp_reg_write(sc, 0xbd2c, val)) != 0) {
+			return (err);
+		}
+	}
+
+	/* Common post-tuning steps */
+	if ((err = ure_ocp_reg_read(sc, 0xa428, &val)) != 0) {
+		return (err);
+	}
+	val &= ~0x0200;
+	if ((err = ure_ocp_reg_write(sc, 0xa428, val)) != 0) {
+		return (err);
+	}
+
+	if ((err = ure_ocp_reg_read(sc, 0xa5ea, &val)) != 0) {
+		return (err);
+	}
+	val &= ~0x0001;
+	if ((err = ure_ocp_reg_write(sc, 0xa5ea, val)) != 0) {
+		return (err);
+	}
+
+	/* Re-enable ALDPS */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_POWER_CFG, &val)) != 0) {
+		return (err);
+	}
+	val |= URE_EN_ALDPS;
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_POWER_CFG, val)) != 0) {
+		return (err);
+	}
+
+	return (USB_SUCCESS);
+}
+
 static int
 ure_rtl8157_init(ure_softc_t *sc)
 {
@@ -2626,17 +3375,43 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 	    URE_FLAG_8157)) {
 		uint16_t reg;
 
-		if ((err = ure_write_2(sc, URE_PLA_RX_FIFO_FULL,
-		    URE_MCU_TYPE_PLA,
-		    (sc->ure_flags & URE_FLAG_8156) ?
-		    1024 : 512)) != USB_SUCCESS) {
-			return (err);
-		}
-		if ((err = ure_write_2(sc, URE_PLA_RX_FIFO_EMPTY,
-		    URE_MCU_TYPE_PLA,
-		    (sc->ure_flags & URE_FLAG_8156) ?
-		    2048 : 1024)) != USB_SUCCESS) {
-			return (err);
+		if (sc->ure_flags & URE_FLAG_8156) {
+			/*
+			 * Dynamic flow control thresholds, matching
+			 * Linux r8156_fc_parameter().  Compute
+			 * pause-on/pause-off from the frame size so
+			 * flow control scales with MTU.
+			 */
+			uint32_t rms;
+			uint16_t pause_on, pause_off;
+
+			rms = ETHERMAX + VLAN_TAGSZ;
+			pause_on = (uint16_t)
+			    ((P2ROUNDUP(rms, 1024) + 6 * 1024) / 16);
+			pause_off = (uint16_t)
+			    ((P2ROUNDUP(rms, 1024) + 14 * 1024) / 16);
+
+			if ((err = ure_write_2(sc, URE_PLA_RX_FIFO_FULL,
+			    URE_MCU_TYPE_PLA,
+			    pause_on)) != USB_SUCCESS) {
+				return (err);
+			}
+			if ((err = ure_write_2(sc, URE_PLA_RX_FIFO_EMPTY,
+			    URE_MCU_TYPE_PLA,
+			    pause_off)) != USB_SUCCESS) {
+				return (err);
+			}
+		} else {
+			if ((err = ure_write_2(sc, URE_PLA_RX_FIFO_FULL,
+			    URE_MCU_TYPE_PLA,
+			    512)) != USB_SUCCESS) {
+				return (err);
+			}
+			if ((err = ure_write_2(sc, URE_PLA_RX_FIFO_EMPTY,
+			    URE_MCU_TYPE_PLA,
+			    1024)) != USB_SUCCESS) {
+				return (err);
+			}
 		}
 
 		/* TX share FIFO free credit full threshold */
@@ -2908,7 +3683,7 @@ ure_ifmedia_init(ure_softc_t *sc)
 		}
 
 		if ((sc->ure_chip & URE_CHIP_VER_6010) ||
-		    (sc->ure_flags & URE_FLAG_8156B)) {
+		    (sc->ure_flags & (URE_FLAG_8156 | URE_FLAG_8156B))) {
 			if ((err = ure_clrbit_2(sc, URE_USB_FW_TASK,
 			    URE_MCU_TYPE_USB,
 			    URE_FC_PATCH_TASK)) != USB_SUCCESS) {
@@ -3035,6 +3810,28 @@ ure_link_check(void *arg)
 		if (ure_setbit_1(sc, URE_PLA_CR, URE_MCU_TYPE_PLA,
 		    URE_CR_RE | URE_CR_TE) != USB_SUCCESS) {
 			return;
+		}
+
+		/*
+		 * Disable idle speed-down at 2.5G to avoid MAC
+		 * timing issues.  Re-enable at lower speeds.
+		 */
+		if (sc->ure_flags & URE_FLAG_8156) {
+			if (status & URE_PHYSTATUS_2500MBPS) {
+				if (ure_clrbit_2(sc,
+				    URE_PLA_MAC_PWR_CTRL4,
+				    URE_MCU_TYPE_PLA,
+				    URE_IDLE_SPDWN_EN) != USB_SUCCESS) {
+					return;
+				}
+			} else {
+				if (ure_setbit_2(sc,
+				    URE_PLA_MAC_PWR_CTRL4,
+				    URE_MCU_TYPE_PLA,
+				    URE_IDLE_SPDWN_EN) != USB_SUCCESS) {
+					return;
+				}
+			}
 		}
 	} else {
 		uint16_t bmsr;
@@ -4982,6 +5779,7 @@ ure_chip_init(ure_softc_t *sc)
 		break;
 	case 0x7030:
 		sc->ure_flags = URE_FLAG_8156;
+		sc->ure_chip |= URE_CHIP_VER_7030;
 		sc->ure_txbufsz = URE_8156_TX_BUFSZ;
 		sc->ure_rxbufsz = URE_8156_RX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
@@ -5047,6 +5845,11 @@ ure_chip_init(ure_softc_t *sc)
 	case URE_FLAG_8156B:
 		if ((err = ure_rtl8153b_init(sc)) != USB_SUCCESS) {
 			return (err);
+		}
+		if ((sc->ure_flags & URE_FLAG_CHIP_MASK) == URE_FLAG_8156) {
+			if ((err = ure_rtl8156_phy_cfg(sc)) != USB_SUCCESS) {
+				return (err);
+			}
 		}
 		break;
 	case URE_FLAG_8157:
