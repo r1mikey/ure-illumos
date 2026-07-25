@@ -5048,23 +5048,6 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		}
 
 		if (sc->ure_flags & URE_FLAG_8153B) {
-			/*
-			 * TX share FIFO free credit full threshold.
-			 * Below 8000 MTU the FIFO can hold a full
-			 * frame; above that, shrink the threshold so
-			 * jumbo frames are not rejected.
-			 */
-			if ((err = ure_write_2(sc, URE_PLA_TXFIFO_CTRL,
-			    URE_MCU_TYPE_PLA, 8)) != USB_SUCCESS) {
-				return (err);
-			}
-			if ((err = ure_write_2(sc,
-			    URE_PLA_TXFIFO_FULL, URE_MCU_TYPE_PLA,
-			    (sc->ure_mtu < 8000) ?
-			    (2048 / 8) : (900 / 8))) != USB_SUCCESS) {
-				return (err);
-			}
-
 			if ((err = ure_write_4(sc, URE_USB_RX_BUF_TH,
 			    URE_MCU_TYPE_USB, URE_RX_THR_B)) !=
 			    USB_SUCCESS) {
