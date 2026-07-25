@@ -7553,28 +7553,36 @@ ure_chip_init(ure_softc_t *sc)
 		break;
 	case 0x5c00:
 		sc->ure_chip |= URE_CHIP_VER_5C00;
-		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
+		sc->ure_rxbufsz = (ure_dev_speed(sc) <
+		    USBA_SUPER_SPEED_DEV) ?
+		    URE_8152_RX_BUFSZ : URE_8153_RX_BUFSZ;
 		sc->ure_txbufsz = URE_TX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8153 (0x%04x)\n", ver);
 		break;
 	case 0x5c10:
 		sc->ure_chip |= URE_CHIP_VER_5C10;
-		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
+		sc->ure_rxbufsz = (ure_dev_speed(sc) <
+		    USBA_SUPER_SPEED_DEV) ?
+		    URE_8152_RX_BUFSZ : URE_8153_RX_BUFSZ;
 		sc->ure_txbufsz = URE_TX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8153 (0x%04x)\n", ver);
 		break;
 	case 0x5c20:
 		sc->ure_chip |= URE_CHIP_VER_5C20;
-		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
+		sc->ure_rxbufsz = (ure_dev_speed(sc) <
+		    USBA_SUPER_SPEED_DEV) ?
+		    URE_8152_RX_BUFSZ : URE_8153_RX_BUFSZ;
 		sc->ure_txbufsz = URE_TX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8153 (0x%04x)\n", ver);
 		break;
 	case 0x5c30:
 		sc->ure_chip |= URE_CHIP_VER_5C30;
-		sc->ure_rxbufsz = URE_8153_RX_BUFSZ;
+		sc->ure_rxbufsz = (ure_dev_speed(sc) <
+		    USBA_SUPER_SPEED_DEV) ?
+		    URE_8152_RX_BUFSZ : URE_8153_RX_BUFSZ;
 		sc->ure_txbufsz = URE_TX_BUFSZ;
 		dev_err(sc->ure_dip, CE_CONT,
 		    "?RTL8153 (0x%04x)\n", ver);
