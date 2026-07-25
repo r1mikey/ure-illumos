@@ -95,7 +95,7 @@ extern "C" {
 #define	URE_BYTE_EN_SIX_BYTES	0x3f
 
 #define	URE_FRAMELEN(mtu)	\
-	((mtu) + ETHER_HEAD_LEN + ETHERFCSL + VLAN_TAGSZ)
+	((mtu) + sizeof (struct ether_header) + ETHERFCSL + VLAN_TAGSZ)
 
 /*
  * Maximum MTU by chip family.  Derived from the maximum receive frame

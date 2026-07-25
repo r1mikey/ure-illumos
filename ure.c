@@ -4918,7 +4918,7 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		return (err);
 	}
 	if ((err = ure_write_2(sc, URE_PLA_RMS, URE_MCU_TYPE_PLA,
-	    ETHERMAX + VLAN_TAGSZ)) != USB_SUCCESS) {
+	    URE_FRAMELEN(sc->ure_mtu))) != USB_SUCCESS) {
 		return (err);
 	}
 	if ((err = ure_write_1(sc, URE_PLA_MTPS, URE_MCU_TYPE_PLA,
@@ -4965,9 +4965,18 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		    URE_MCU_TYPE_PLA, 8)) != USB_SUCCESS) {
 			return (err);
 		}
-		if ((err = ure_write_2(sc, URE_PLA_TXFIFO_FULL,
-		    URE_MCU_TYPE_PLA, 128)) != USB_SUCCESS) {
-			return (err);
+		{
+			uint32_t rms;
+			uint16_t txfull;
+
+			rms = URE_FRAMELEN(sc->ure_mtu);
+			txfull = (uint16_t)(P2ROUNDUP(rms +
+			    sizeof (ure_txpkt_v2_t), 1024) / 16);
+			if ((err = ure_write_2(sc, URE_PLA_TXFIFO_FULL,
+			    URE_MCU_TYPE_PLA,
+			    txfull)) != USB_SUCCESS) {
+				return (err);
+			}
 		}
 
 		if (sc->ure_flags & URE_FLAG_8156) {
@@ -5039,6 +5048,23 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 		}
 
 		if (sc->ure_flags & URE_FLAG_8153B) {
+			/*
+			 * TX share FIFO free credit full threshold.
+			 * Below 8000 MTU the FIFO can hold a full
+			 * frame; above that, shrink the threshold so
+			 * jumbo frames are not rejected.
+			 */
+			if ((err = ure_write_2(sc, URE_PLA_TXFIFO_CTRL,
+			    URE_MCU_TYPE_PLA, 8)) != USB_SUCCESS) {
+				return (err);
+			}
+			if ((err = ure_write_2(sc,
+			    URE_PLA_TXFIFO_FULL, URE_MCU_TYPE_PLA,
+			    (sc->ure_mtu < 8000) ?
+			    (2048 / 8) : (900 / 8))) != USB_SUCCESS) {
+				return (err);
+			}
+
 			if ((err = ure_write_4(sc, URE_USB_RX_BUF_TH,
 			    URE_MCU_TYPE_USB, URE_RX_THR_B)) !=
 			    USB_SUCCESS) {
@@ -6797,9 +6823,9 @@ ure_m_stop(void *arg)
 		(void) ure_reset(sc);
 		(void) ure_reset_bmu(sc);
 
-		/* Restore default RMS and MTPS */
+		/* Restore RMS and MTPS for current MTU */
 		(void) ure_write_2(sc, URE_PLA_RMS,
-		    URE_MCU_TYPE_PLA, ETHERMAX + VLAN_TAGSZ);
+		    URE_MCU_TYPE_PLA, URE_FRAMELEN(sc->ure_mtu));
 		(void) ure_write_1(sc, URE_PLA_MTPS,
 		    URE_MCU_TYPE_PLA, URE_MTPS_DEFAULT);
 
