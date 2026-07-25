@@ -7098,15 +7098,49 @@ static int
 ure_m_setprop(void *arg, const char *pr_name,
     mac_prop_id_t pr_num, uint_t pr_valsize, const void *pr_val)
 {
-	_NOTE(ARGUNUSED(arg, pr_name, pr_num, pr_valsize, pr_val));
-	return (ENOTSUP);
+	ure_softc_t *sc = (ure_softc_t *)arg;
+
+	_NOTE(ARGUNUSED(pr_name));
+
+	switch (pr_num) {
+	case MAC_PROP_MTU: {
+		uint32_t new_mtu;
+		uint32_t old_mtu;
+		int err;
+
+		ASSERT(pr_valsize >= sizeof (uint32_t));
+		bcopy(pr_val, &new_mtu, sizeof (new_mtu));
+
+		if (new_mtu == sc->ure_mtu) {
+			return (0);
+		}
+		if (new_mtu < ETHERMTU || new_mtu > sc->ure_max_mtu) {
+			return (EINVAL);
+		}
+		if (sc->ure_running) {
+			return (EBUSY);
+		}
+
+		old_mtu = sc->ure_mtu;
+		sc->ure_mtu = new_mtu;
+		err = mac_maxsdu_update(sc->ure_mh, new_mtu);
+		if (err != 0) {
+			sc->ure_mtu = old_mtu;
+		}
+		return (err);
+	}
+	default:
+		return (ENOTSUP);
+	}
 }
 
 static void
 ure_m_propinfo(void *arg, const char *pr_name,
     mac_prop_id_t pr_num, mac_prop_info_handle_t prh)
 {
-	_NOTE(ARGUNUSED(arg, pr_name));
+	ure_softc_t *sc = (ure_softc_t *)arg;
+
+	_NOTE(ARGUNUSED(pr_name));
 
 	switch (pr_num) {
 	case MAC_PROP_DUPLEX:
@@ -7124,8 +7158,9 @@ ure_m_propinfo(void *arg, const char *pr_name,
 		    LINK_FLOWCTRL_NONE);
 		break;
 	case MAC_PROP_MTU:
-		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
-		mac_prop_info_set_range_uint32(prh, ETHERMTU, ETHERMTU);
+		mac_prop_info_set_perm(prh, MAC_PROP_PERM_RW);
+		mac_prop_info_set_range_uint32(prh, ETHERMTU,
+		    sc->ure_max_mtu);
 		break;
 	case MAC_PROP_ADV_2500FDX_CAP:
 	case MAC_PROP_EN_2500FDX_CAP:
@@ -7582,6 +7617,29 @@ ure_chip_init(ure_softc_t *sc)
 		sc->ure_txbufsz = URE_TX_BUFSZ;
 		dev_err(sc->ure_dip, CE_WARN,
 		    "unknown chip version 0x%04x", ver);
+		break;
+	}
+
+	/*
+	 * Set the maximum MTU based on the chip family.  RTL8152 is
+	 * Fast Ethernet with no jumbo support.  RTL8153/8153B support
+	 * up to 9 KiB frames.  RTL8156 supports 15 KiB.  RTL8156B and
+	 * RTL8157 support 16 KiB.
+	 */
+	switch (sc->ure_flags & URE_FLAG_CHIP_MASK) {
+	case URE_FLAG_8152:
+		sc->ure_max_mtu = URE_MAX_MTU_8152;
+		break;
+	case URE_FLAG_8156:
+		sc->ure_max_mtu = URE_MAX_MTU_8156;
+		break;
+	case URE_FLAG_8156B:
+	case URE_FLAG_8157:
+		sc->ure_max_mtu = URE_MAX_MTU_8156B;
+		break;
+	default:
+		/* RTL8153 (no flag) and RTL8153B */
+		sc->ure_max_mtu = URE_MAX_MTU_8153;
 		break;
 	}
 

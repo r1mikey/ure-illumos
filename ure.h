@@ -235,6 +235,7 @@ typedef struct ure_softc {
 	uint32_t		ure_rxbufsz;
 	uint32_t		ure_txbufsz;
 	uint32_t		ure_mtu;
+	uint32_t		ure_max_mtu;
 
 	/* RX state */
 	uint_t			ure_rx_cnt;	/* bulk-IN xfers in flight */

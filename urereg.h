@@ -97,6 +97,20 @@ extern "C" {
 #define	URE_FRAMELEN(mtu)	\
 	((mtu) + ETHER_HEAD_LEN + ETHERFCSL + VLAN_TAGSZ)
 
+/*
+ * Maximum MTU by chip family.  Derived from the maximum receive frame
+ * size each chip can handle (frame - VLAN header - FCS = MTU).
+ *
+ *   RTL8152          1500   (Fast Ethernet, no jumbo support)
+ *   RTL8153/8153B    9194   (9 KiB frame)
+ *   RTL8156          15338  (15 KiB frame)
+ *   RTL8156B/8157    16362  (16 KiB frame)
+ */
+#define	URE_MAX_MTU_8152	ETHERMTU
+#define	URE_MAX_MTU_8153	9194
+#define	URE_MAX_MTU_8156	15338
+#define	URE_MAX_MTU_8156B	16362
+
 /* ------------------------------------------------------------------ */
 /* PLA (Protocol Logic Adapter) registers                             */
 /* ------------------------------------------------------------------ */
