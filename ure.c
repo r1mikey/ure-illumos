@@ -4961,23 +4961,18 @@ ure_rtl8153_nic_reset(ure_softc_t *sc)
 			}
 		}
 
-		/* TX share FIFO free credit full threshold */
-		if ((err = ure_write_2(sc, URE_PLA_TXFIFO_CTRL,
-		    URE_MCU_TYPE_PLA, 8)) != USB_SUCCESS) {
+		/*
+		 * TX share FIFO free credit full threshold.
+		 * Use the combined 32-bit write (TXFIFO_THR_NORMAL2)
+		 * which sets TXFIFO_CTRL = 8 and TXFIFO_FULL = 256.
+		 * The per-MTU formula (P2ROUNDUP/16) causes TX stalls
+		 * under high window pressure; the fixed threshold
+		 * matches what works for RTL8153B.
+		 */
+		if ((err = ure_write_4(sc, URE_PLA_TXFIFO_CTRL,
+		    URE_MCU_TYPE_PLA,
+		    URE_TXFIFO_THR_NORMAL2)) != USB_SUCCESS) {
 			return (err);
-		}
-		{
-			uint32_t rms;
-			uint16_t txfull;
-
-			rms = URE_FRAMELEN(sc->ure_mtu);
-			txfull = (uint16_t)(P2ROUNDUP(rms +
-			    sizeof (ure_txpkt_v2_t), 1024) / 16);
-			if ((err = ure_write_2(sc, URE_PLA_TXFIFO_FULL,
-			    URE_MCU_TYPE_PLA,
-			    txfull)) != USB_SUCCESS) {
-				return (err);
-			}
 		}
 
 		if (sc->ure_flags & URE_FLAG_8156) {
