@@ -265,8 +265,15 @@ extern "C" {
 #define	URE_OCP_BMCR_ANE	0x1000	/* auto-negotiation enable */
 #define	URE_OCP_BMCR_RSAN	0x0200	/* restart auto-negotiation */
 #define	URE_OCP_ANAR		0xa408	/* MII advertisement (register 4) */
+#define	URE_ANAR_10_HALF	0x0020	/* advertise 10BASE-T half */
+#define	URE_ANAR_10_FULL	0x0040	/* advertise 10BASE-T full */
+#define	URE_ANAR_100_HALF	0x0080	/* advertise 100BASE-TX half */
+#define	URE_ANAR_100_FULL	0x0100	/* advertise 100BASE-TX full */
 #define	URE_ANAR_PAUSE		0x0400	/* advertise 802.3x PAUSE */
 #define	URE_ANAR_ASYM_PAUSE	0x0800	/* advertise asymmetric PAUSE */
+#define	URE_OCP_GBCR		0xa412	/* MII 1000BASE-T control (register 9) */
+#define	URE_GBCR_1000_HALF	0x0100	/* advertise 1000BASE-T half */
+#define	URE_GBCR_1000_FULL	0x0200	/* advertise 1000BASE-T full */
 #define	URE_OCP_EEE_AR		0xa41a
 #define	URE_OCP_EEE_DATA	0xa41c
 #define	URE_OCP_PHY_STATUS	0xa420

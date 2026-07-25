@@ -202,6 +202,7 @@ static int	ure_disable_teredo(ure_softc_t *);
 static int	ure_reset(ure_softc_t *);
 static int	ure_phy_powerdown(ure_softc_t *);
 static int	ure_phy_powerup(ure_softc_t *);
+static int	ure_set_autoneg(ure_softc_t *);
 static int	ure_rxvlan(ure_softc_t *);
 static int	ure_set_rx_filter(ure_softc_t *);
 static int	ure_ifmedia_init(ure_softc_t *);
@@ -7486,6 +7487,74 @@ reconn_fail:
 }
 
 /*
+ * Program PHY auto-negotiation advertisement and restart negotiation.
+ * Called once at the end of ure_chip_init() after all chip-specific PHY
+ * configuration has run, matching Linux rtl8152_set_speed() with
+ * AUTONEG_ENABLE.
+ *
+ * RTL8152 is 10/100 only; all other variants support 1000BASE-T.
+ * RTL8156/8156B/8157 additionally support 2500BASE-T.
+ * RTL8157 additionally supports 5000BASE-T.
+ */
+static int
+ure_set_autoneg(ure_softc_t *sc)
+{
+	uint16_t val;
+	int err;
+
+	/* Advertise 10/100 half and full duplex + flow control */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_ANAR, &val)) != 0) {
+		return (err);
+	}
+	val |= URE_ANAR_10_HALF | URE_ANAR_10_FULL |
+	    URE_ANAR_100_HALF | URE_ANAR_100_FULL |
+	    URE_ANAR_PAUSE | URE_ANAR_ASYM_PAUSE;
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_ANAR, val)) != 0) {
+		return (err);
+	}
+
+	/* Advertise 1000BASE-T full duplex (all chips except RTL8152) */
+	if (!(sc->ure_flags & URE_FLAG_8152)) {
+		if ((err = ure_ocp_reg_read(sc, URE_OCP_GBCR,
+		    &val)) != 0) {
+			return (err);
+		}
+		val |= URE_GBCR_1000_FULL;
+		if ((err = ure_ocp_reg_write(sc, URE_OCP_GBCR,
+		    val)) != 0) {
+			return (err);
+		}
+	}
+
+	/* Advertise 2500BASE-T full duplex (8156/8156B/8157) */
+	if (ure_has_2500fdx(sc)) {
+		if ((err = ure_ocp_reg_read(sc, URE_OCP_10GBT_CTRL,
+		    &val)) != 0) {
+			return (err);
+		}
+		val |= URE_ADV_2500TFDX;
+		if (ure_has_5000fdx(sc)) {
+			val |= URE_ADV_5000TFDX;
+		}
+		if ((err = ure_ocp_reg_write(sc, URE_OCP_10GBT_CTRL,
+		    val)) != 0) {
+			return (err);
+		}
+	}
+
+	/* Enable and restart auto-negotiation */
+	if ((err = ure_ocp_reg_read(sc, URE_OCP_BMCR, &val)) != 0) {
+		return (err);
+	}
+	val |= URE_OCP_BMCR_ANE | URE_OCP_BMCR_RSAN;
+	if ((err = ure_ocp_reg_write(sc, URE_OCP_BMCR, val)) != 0) {
+		return (err);
+	}
+
+	return (USB_SUCCESS);
+}
+
+/*
  * Chip identification
  */
 
@@ -7710,6 +7779,14 @@ ure_chip_init(ure_softc_t *sc)
 			return (err);
 		}
 		break;
+	}
+
+	/*
+	 * Program PHY speed advertisement and restart auto-negotiation.
+	 * All chip-specific PHY configuration has completed by this point.
+	 */
+	if ((err = ure_set_autoneg(sc)) != USB_SUCCESS) {
+		return (err);
 	}
 
 	return (USB_SUCCESS);
