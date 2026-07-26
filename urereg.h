@@ -812,7 +812,7 @@ typedef struct ure_txpkt_v2 {
 
 #define	URE_TX_BUFSZ		16384
 #define	URE_TX_COAL_USEC	1000	/* TX coalescing timer (usec) */
-#define	URE_8156_TX_BUFSZ	32768
+#define	URE_8156_TX_BUFSZ	16384
 #define	URE_8152_RX_BUFSZ	16384
 #define	URE_8153_RX_BUFSZ	32768
 /* Linux r8152 uses 48KB for 8156; OpenBSD uses 32KB for all variants. */
