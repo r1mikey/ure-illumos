@@ -184,7 +184,9 @@ static boolean_t	ure_tx_offload(ure_softc_t *, mblk_t **,
 static boolean_t	ure_tx_sw_csum(const ure_tx_offload_t *, uchar_t *,
 		    uint32_t);
 static void	ure_txc_discard(ure_softc_t *);
+#if 0
 static void	ure_txc_timeout(void *);
+#endif
 
 static int	ure_chip_init(ure_softc_t *);
 static void	ure_chip_uninit(ure_softc_t *);
@@ -6193,6 +6195,7 @@ ure_txc_discard(ure_softc_t *sc)
 	}
 }
 
+#if 0
 /*
  * Coalescing timer callback: flush whatever has accumulated.
  */
@@ -6220,6 +6223,7 @@ ure_txc_timeout(void *arg)
 
 	ure_txc_submit(sc, chain);
 }
+#endif
 
 /*
  * TX offload descriptor setup.
@@ -6601,11 +6605,9 @@ ure_m_tx(void *arg, mblk_t *mp)
 		}
 	}
 
-	/* 3. Arm the coalescing timer if data is pending */
-	if (sc->ure_txc_chain != NULL && sc->ure_txc_chain->uc_npkts > 0 &&
-	    sc->ure_txc_tid == 0) {
-		sc->ure_txc_tid = timeout(ure_txc_timeout, sc,
-		    drv_usectohz(URE_TX_COAL_USEC));
+	/* 3. Submit any pending data immediately */
+	if (sc->ure_txc_chain != NULL && sc->ure_txc_chain->uc_npkts > 0) {
+		ure_txc_flush_locked(sc);
 	}
 
 	mutex_exit(&sc->ure_txc_lock);
